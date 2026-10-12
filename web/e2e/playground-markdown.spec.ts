@@ -18,7 +18,7 @@ test.afterAll(async ({ request }) => {
 
 for (const endpoint of ["Chat Completions", "Responses"]) {
   for (const stream of [true, false]) {
-    test(`${endpoint} renders Markdown with stream=${stream} and preserves raw output`, async ({ page }) => {
+    test(`${endpoint} renders Markdown with stream=${stream} and preserves raw output`, async ({ page, request }) => {
       const errors: string[] = []
       page.on("pageerror", error => errors.push(error.message))
       await page.goto("/")
@@ -33,14 +33,28 @@ for (const endpoint of ["Chat Completions", "Responses"]) {
       if (!stream) await page.getByRole("switch", { name: "流式输出" }).click()
       const prompt = "[markdown-fixture] **保持原文**"
       await page.getByLabel("输入提示词").fill(prompt)
+      const gate = "markdown-" + Date.now()
+      if (stream) {
+        const routePath = endpoint === "Responses" ? "responses" : "chat/completions"
+        await page.route("**/api/admin/playground/" + routePath, async route => {
+          await route.continue({ postData: JSON.stringify({ ...route.request().postDataJSON(), fixture_stream_gate: gate }) })
+        }, { times: 1 })
+      }
       await page.getByRole("button", { name: "发送请求" }).click()
       const output = page.locator(".chat-message.assistant .markdown-content")
-      await expect(output.getByRole("heading", { name: "Markdown 回复" })).toBeVisible()
-      if (stream) {
-        await expect(page.getByRole("button", { name: "停止生成" })).toBeVisible()
-        await expect(page.getByText("响应完成", { exact: true })).toHaveCount(0)
+      try {
+        await expect(output.getByRole("heading", { name: "Markdown 回复" })).toBeVisible()
+        if (stream) {
+          await expect(page.getByRole("button", { name: "停止生成" })).toBeVisible()
+          await expect(page.getByText("响应完成", { exact: true })).toHaveCount(0)
+        }
+      } finally {
+        if (stream) {
+          const released = await request.post("http://127.0.0.1:18090/__fixtures/release-stream/" + gate, { headers: { Authorization: "Bearer mock-bedrock-key" } })
+          expect(released.ok()).toBe(true)
+        }
       }
-      await expect(page.getByText("响应完成", { exact: true })).toBeVisible()
+      await expect(page.getByText("响应完成", { exact: true })).toBeVisible({ timeout: 15000 })
       await expect(page.locator(".chat-message.user .chat-content")).toHaveText(prompt)
       await expect(page.locator(".chat-message.user .markdown-content")).toHaveCount(0)
       await expect(output.locator("strong").first()).toHaveText("加粗")

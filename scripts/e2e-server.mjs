@@ -19,10 +19,16 @@ const markdownAnswer = [
   "---",
   "Markdown 渲染完成。",
 ].join("\n\n")
+const streamGates = new Map()
 const mock = createServer(async (req, res) => {
   res.setHeader("Content-Type", "application/json")
   if (req.headers.authorization !== "Bearer mock-bedrock-key") {
     res.writeHead(401); res.end(JSON.stringify({ error: { message: "Invalid fixture key" } })); return
+  }
+  if (req.method === "POST" && req.url.startsWith("/__fixtures/release-stream/")) {
+    const release = streamGates.get(req.url.slice("/__fixtures/release-stream/".length))
+    if (release) release()
+    res.writeHead(release ? 204 : 404); res.end(); return
   }
   if (req.url === "/v1/models") {
     res.end(JSON.stringify({ object: "list", data: [{ id: "mock-model", object: "model", created: 0, owned_by: "e2e-fixture" }] })); return
@@ -49,10 +55,22 @@ const mock = createServer(async (req, res) => {
   res.flushHeaders()
   if (responses) res.write(`event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "resp_mock", object: "response" } })}\n\n`)
   const deltas = markdown ? ["# Markdown 回复\n\n", ...markdownAnswer.slice("# Markdown 回复\n\n".length).match(/[\s\S]{1,40}/g)] : ["你好！", "Mantle Mask ", "的流式代理", "运行正常。"]
-  for (const text of deltas) {
+  // An explicit test barrier makes in-progress assertions independent of CPU speed.
+  let gateWait
+  if (markdown && typeof input.fixture_stream_gate === "string") {
+    const id = input.fixture_stream_gate
+    gateWait = new Promise(resolve => {
+      const release = () => { clearTimeout(timer); streamGates.delete(id); resolve() }
+      const timer = setTimeout(release, 30000)
+      streamGates.set(id, release)
+      res.once("close", release)
+    })
+  }
+  for (const [index, text] of deltas.entries()) {
     await new Promise(resolve => setTimeout(resolve, markdown ? 100 : 45))
     const event = responses ? { type: "response.output_text.delta", delta: text } : { id: "chatcmpl_mock", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: text } }] }
     res.write(`data: ${JSON.stringify(event)}\n\n`)
+    if (index === 0 && gateWait) await gateWait
   }
   if (responses) res.end(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_mock", usage } })}\n\n`)
   else res.end(`data: ${JSON.stringify({ choices: [], usage })}\n\ndata: [DONE]\n\n`)

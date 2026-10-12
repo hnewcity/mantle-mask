@@ -1,6 +1,20 @@
 # 验证记录
 
-日期：2026-10-10。
+## 2026-10-12 · 开源发布验证
+
+- `bash scripts/build.sh`：前端生产构建与 Go 二进制构建通过。
+- `go test -race ./...`、`go vet ./...`：通过。
+- Vitest：5 个测试文件、20 个用例通过；TypeScript 构建检查通过。
+- 首页截图：隔离模拟数据生成，已人工检查；没有读取真实账号或生产数据。
+- `docker build -t mantle-mask:smoke .`：Linux amd64 镜像构建通过。
+- `bash scripts/docker-smoke.sh mantle-mask:smoke`：非 root 用户、嵌入前端、鉴权、可写数据卷和重启持久化检查通过。脚本在重启后重新读取 Docker 随机宿主机端口。
+- `actionlint`、Compose 配置解析、shell 语法、文档本地链接检查：通过。
+- 对待公开快照运行 Gitleaks：未发现泄漏。扫描结果不能替代后续凭据管理与人工审查。
+- 首次 GitHub CI 已通过 Go / 前端 / 全部浏览器测试；完整发布结果以 [CI](https://github.com/hnewcity/mantle-mask/actions/workflows/ci.yml) 对应提交为准。
+- Markdown 流式 UI 的进行中状态使用模拟上游的显式暂停 / 释放机制验证，不再依赖短暂的时间窗口。
+- 本轮没有调用真实 AWS 推理。
+
+## 2026-10-10 · 历史验证记录
 
 ## 环境
 
@@ -54,6 +68,6 @@ Gin 迁移新增验证：未知 API 路径仍先鉴权并返回 JSON 错误、�
 
 ## 尚未覆盖
 
-- 当前机器没有 Docker，Dockerfile / Compose 尚未实际构建运行。
+- 2026-10-10 记录时尚未实际构建 Docker；2026-10-12 已补充本地构建和容器 smoke 验证，见上文。
 - 真实 SigV4 调用未执行；提供的凭据是 Bearer，SigV4 验证限于本地签名和转发测试。
 - 没有遍历全部模型／区域／工具组合，也没有做生产负载压测或多副本部署测试。

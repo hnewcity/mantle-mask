@@ -29,6 +29,7 @@ LABEL org.opencontainers.image.title="Mantle Mask" \
 COPY --from=backend /mantle-mask /mantle-mask
 COPY --from=backend --chown=65532:65532 /empty-data /app/data
 COPY LICENSE NOTICE /usr/share/licenses/mantle-mask/
+COPY web/src/components/ui/LICENSE.md /usr/share/licenses/mantle-mask/shadcn-ui-LICENSE
 WORKDIR /app
 ENV MANTLE_ADDR=0.0.0.0:8080 MANTLE_DATA_DIR=/app/data
 EXPOSE 8080

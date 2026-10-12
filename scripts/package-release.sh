@@ -14,6 +14,8 @@ for arch in amd64 arm64; do
   mkdir -p "$stage/$name"
   CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o "$stage/$name/mantle-mask" ./cmd/mantle-mask
   cp LICENSE NOTICE README.md .env.example "$stage/$name/"
+  cp web/src/components/ui/LICENSE.md "$stage/$name/shadcn-ui-LICENSE"
+  cp -R docs "$stage/$name/docs"
   tar -C "$stage" -czf "dist/$name.tar.gz" "$name"
 done
 (cd dist && sha256sum "mantle-mask_${version}_linux_"*.tar.gz > "mantle-mask_${version}_checksums.txt")

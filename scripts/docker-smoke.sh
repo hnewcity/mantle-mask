@@ -14,11 +14,14 @@ trap cleanup EXIT
 docker volume create "$volume" >/dev/null
 docker run -d --name "$name" -p 127.0.0.1::8080 --mount "type=volume,src=$volume,dst=/app/data" \
   -e "MANTLE_ADMIN_TOKEN=$token" "$image" >/dev/null
-port=$(docker port "$name" 8080/tcp | head -n1 | cut -d: -f2)
-url="http://127.0.0.1:$port"
+address() {
+  port=$(docker port "$name" 8080/tcp | head -n1 | cut -d: -f2)
+  url="http://127.0.0.1:$port"
+}
+address
 ready() {
   for attempt in $(seq 1 30); do
-    if curl -fsS "$url/healthz" >/dev/null; then return; fi
+    if curl --max-time 2 -fsS "$url/healthz" >/dev/null 2>&1; then return; fi
     sleep 1
   done
   docker logs "$name"
@@ -31,6 +34,8 @@ curl -fsS -H "Authorization: Bearer $token" "$url/api/admin/overview" >/dev/null
 curl -fsS -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
   -d '{"name":"docker-persistence-check","note":"fixture","enabled":true}' "$url/api/admin/users" >/dev/null
 docker restart "$name" >/dev/null
+# Docker may allocate a different ephemeral host port after a restart.
+address
 ready
 curl -fsS -H "Authorization: Bearer $token" "$url/api/admin/users" | grep -q 'docker-persistence-check'
 echo 'Docker smoke passed: non-root, embedded UI, auth, writable volume, restart persistence.'
