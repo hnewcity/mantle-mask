@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS frontend
+FROM --platform=$BUILDPLATFORM node:26-bookworm-slim AS frontend
 WORKDIR /src/web
 COPY web/package*.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
