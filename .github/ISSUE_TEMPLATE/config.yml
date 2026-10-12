@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 私密安全报告
+    url: https://github.com/hnewcity/mantle-mask/security/advisories/new
+    about: 请勿公开未修复漏洞或真实凭据

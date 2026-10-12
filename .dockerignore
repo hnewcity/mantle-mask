@@ -1,0 +1,35 @@
+# Allowlist: runtime data, credentials, Git history and screenshots never enter the build context.
+**
+!Dockerfile
+!.dockerignore
+!go.mod
+!go.sum
+!LICENSE
+!NOTICE
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!web/
+web/*
+!web/embed.go
+!web/fallback.html
+!web/index.html
+!web/package.json
+!web/package-lock.json
+!web/tsconfig.json
+!web/vite.config.ts
+!web/src/
+!web/src/**
+!web/public/
+!web/public/**
+**/*_test.go
+**/*.test.ts
+
+# Defense in depth for any future allowlist changes.
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

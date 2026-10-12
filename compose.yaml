@@ -1,0 +1,19 @@
+services:
+  mantle-mask:
+    image: ${MANTLE_IMAGE:-ghcr.io/hnewcity/mantle-mask:latest}
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      MANTLE_ADDR: "0.0.0.0:8080"
+      MANTLE_DATA_DIR: "/app/data"
+      MANTLE_ADMIN_TOKEN: "${MANTLE_ADMIN_TOKEN:-}"
+      MANTLE_MASTER_KEY: "${MANTLE_MASTER_KEY:-}"
+      MANTLE_CORS_ORIGINS: "${MANTLE_CORS_ORIGINS:-}"
+    volumes:
+      - mantle-data:/app/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  mantle-data:

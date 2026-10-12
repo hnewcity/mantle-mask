@@ -1,0 +1,16 @@
+Mantle Mask
+Copyright (C) 2026 hnewcity and contributors
+
+Project source: https://github.com/hnewcity/mantle-mask
+Project license: AGPL-3.0-only (see LICENSE).
+
+README layout and documentation organization were inspired by:
+  https://github.com/hnewcity/cursor-gateway
+No Cursor gateway implementation is incorporated by this documentation work.
+
+The UI includes shadcn/ui-derived components under the MIT License.
+Their original notice is preserved in web/src/components/ui/LICENSE.md.
+Other Go and npm dependencies retain their respective licenses and notices;
+see go.mod, go.sum, web/package.json and web/package-lock.json for identities.
+Amazon Web Services, Bedrock and OpenAI names identify compatible services.
+This project is not affiliated with or endorsed by their owners.

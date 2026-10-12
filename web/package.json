@@ -1,0 +1,44 @@
+{
+  "name": "mantle-mask-web",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "typecheck": "tsc -b",
+    "test": "vitest run src",
+    "test:e2e": "playwright test",
+    "screenshots:readme": "playwright test e2e/readme-screenshot.spec.ts"
+  },
+  "dependencies": {
+    "@daypicker/react": "10.0.2",
+    "@radix-ui/react-dialog": "1.2.0",
+    "@radix-ui/react-popover": "1.2.0",
+    "@radix-ui/react-select": "2.3.8",
+    "@radix-ui/react-slot": "1.4.0",
+    "@radix-ui/react-switch": "1.3.8",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.54.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "tailwind-merge": "3.7.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "openai": "7.32.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2",
+    "vite": "8.3.4",
+    "vitest": "5.0.3"
+  }
+}

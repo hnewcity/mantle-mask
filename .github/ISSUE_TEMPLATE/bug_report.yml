@@ -1,0 +1,21 @@
+name: Bug report
+description: 报告可复现的问题；漏洞请使用私密安全报告
+body:
+  - type: textarea
+    id: environment
+    attributes:
+      label: 版本和运行环境
+      description: 版本 / image tag、操作系统、CPU 架构、部署方式
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤、预期与实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志 / 截图
+      description: 不要粘贴 AWS 凭据、管理员令牌、网关 Key 或业务对话
