@@ -34,6 +34,12 @@ func (s *Store) PrepareImport(in PortableState) (State, error) {
 	if err := ValidateSettings(st.Settings); err != nil {
 		return State{}, err
 	}
+	if err := ValidateModelPrices(st.ModelPrices); err != nil {
+		return State{}, err
+	}
+	if err := ValidatePriceCatalog(st.PriceCatalog); err != nil {
+		return State{}, err
+	}
 	if len(st.Upstreams) > 100 || len(st.Users) > 1000 || len(st.APIKeys) > 10000 || len(in.Credentials) != len(st.Upstreams) {
 		return State{}, errors.New("invalid backup configuration size")
 	}

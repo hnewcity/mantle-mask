@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -11,23 +12,26 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/hnewcity/mantle-mask/internal/config"
 	"github.com/hnewcity/mantle-mask/internal/gateway"
+	"github.com/hnewcity/mantle-mask/internal/pricing"
 	webassets "github.com/hnewcity/mantle-mask/web"
 )
 
 type Server struct {
-	backupMu  sync.Mutex
-	store     *config.Store
-	gateway   *gateway.Gateway
-	adminHash string
-	cors      map[string]bool
-	files     http.Handler
-	assets    fs.FS
-	router    *gin.Engine
+	pricingSyncMu sync.Mutex
+	syncPrices    func(context.Context, *config.PriceCatalog, []string) (config.PriceCatalog, error)
+	backupMu      sync.Mutex
+	store         *config.Store
+	gateway       *gateway.Gateway
+	adminHash     string
+	cors          map[string]bool
+	files         http.Handler
+	assets        fs.FS
+	router        *gin.Engine
 }
 
 func New(store *config.Store, proxy *gateway.Gateway, adminToken, origins string) *Server {
 	assets, _ := fs.Sub(webassets.Assets, "dist")
-	s := &Server{store: store, gateway: proxy, adminHash: config.Hash(adminToken), cors: map[string]bool{}, files: http.FileServer(http.FS(assets)), assets: assets}
+	s := &Server{syncPrices: pricing.New().Sync, store: store, gateway: proxy, adminHash: config.Hash(adminToken), cors: map[string]bool{}, files: http.FileServer(http.FS(assets)), assets: assets}
 	for _, origin := range strings.Split(origins, ",") {
 		if origin = strings.TrimSpace(origin); origin != "" && origin != "*" {
 			s.cors[origin] = true
@@ -63,6 +67,22 @@ func (s *Server) routes() {
 	admin.POST("/users", s.saveUser)
 	admin.PUT("/users/:id", s.saveUser)
 	admin.GET("/usage", func(c *gin.Context) { s.report(c, "") })
+	admin.GET("/usage/pricing", func(c *gin.Context) {
+		prices := s.store.Snapshot().ModelPrices
+		if prices == nil {
+			prices = map[string]config.ModelPrice{}
+		}
+		c.JSON(http.StatusOK, prices)
+	})
+	admin.PUT("/usage/pricing", s.saveModelPrices)
+	admin.GET("/usage/pricing/reference", func(c *gin.Context) {
+		catalog := s.store.Snapshot().PriceCatalog
+		if catalog == nil {
+			catalog = &config.PriceCatalog{Entries: []config.ReferencePrice{}, Sources: []config.PriceSourceStatus{}, Warnings: []string{}}
+		}
+		c.JSON(http.StatusOK, catalog)
+	})
+	admin.POST("/usage/pricing/sync", s.synchronizeModelPrices)
 	admin.GET("/overview", func(c *gin.Context) { c.JSON(http.StatusOK, s.gateway.Metrics()) })
 	admin.GET("/logs", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"data": s.gateway.Logs()}) })
 	admin.GET("/upstreams", s.listUpstreams)

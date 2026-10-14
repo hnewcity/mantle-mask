@@ -109,7 +109,7 @@ func validRoute(method, path string) bool {
 
 func (g *Gateway) Close() error { g.client.CloseIdleConnections(); return g.usage.Close() }
 func (g *Gateway) Usage(ctx context.Context, f usage.Filter) (usage.Report, error) {
-	return g.usage.Report(ctx, f)
+	return g.usage.ReportWithPricing(ctx, f, g.store.Snapshot())
 }
 func (g *Gateway) Metrics() Metrics {
 	m := g.runtime.metrics()

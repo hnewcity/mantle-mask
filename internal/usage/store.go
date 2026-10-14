@@ -5,6 +5,7 @@ package usage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hnewcity/mantle-mask/internal/config"
 	_ "modernc.org/sqlite"
 )
 
@@ -48,7 +50,16 @@ type Totals struct {
 	PendingSyncRequests  int64 `json:"pending_sync_requests"`
 }
 
+// Cost distinguishes a configured zero price from requests without a price.
+// It is recalculated with the current price configuration, never a billing ledger.
+type Cost struct {
+	EstimatedUSD     float64 `json:"estimated_usd"`
+	PricedRequests   int64   `json:"priced_requests"`
+	UnpricedRequests int64   `json:"unpriced_requests"`
+}
+
 type Group struct {
+	Cost   Cost   `json:"cost"`
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	UserID string `json:"user_id,omitempty"`
@@ -57,12 +68,14 @@ type Group struct {
 
 // DailyModel preserves the date/model cross-dimension for the usage chart.
 type DailyModel struct {
+	Cost  Cost   `json:"cost"`
 	Date  string `json:"date"`
 	Model string `json:"model"`
 	Totals
 }
 
 type Report struct {
+	Cost           Cost         `json:"cost"`
 	From           string       `json:"from"`
 	To             string       `json:"to"`
 	TimezoneOffset int          `json:"timezone_offset"`
@@ -307,6 +320,46 @@ func destinations(t *Totals) []any {
 }
 
 func (s *Store) Report(ctx context.Context, f Filter) (Report, error) {
+	return s.ReportWithPrices(ctx, f, nil)
+}
+
+func costDestinations(t *Totals, cost *Cost) []any {
+	return append(destinations(t), &cost.EstimatedUSD, &cost.PricedRequests, &cost.UnpricedRequests)
+}
+
+const costAggregate = `, COALESCE(SUM(CASE WHEN usage_known=1 AND price_model IS NOT NULL THEN
+ ((input_tokens-MIN(cached_tokens,input_tokens))*
+ (CASE WHEN threshold>0 AND input_tokens>threshold THEN long_input ELSE input_usd END) +
+ MIN(cached_tokens,input_tokens)*
+ (CASE WHEN threshold>0 AND input_tokens>threshold THEN COALESCE(long_cached,long_input) ELSE COALESCE(cached_usd,input_usd) END) +
+ output_tokens*(CASE WHEN threshold>0 AND input_tokens>threshold THEN long_output ELSE output_usd END))/1000000.0 ELSE 0 END),0),
+ COALESCE(SUM(usage_known=1 AND price_model IS NOT NULL),0),
+ COALESCE(SUM(usage_known=1 AND price_model IS NULL),0)`
+
+const priceRelation = `WITH prices AS (
+ SELECT json_extract(value,'$.model') AS price_model, json_extract(value,'$.upstream') AS price_upstream,
+ json_extract(value,'$.price.input_usd_per_million') AS input_usd,
+ json_extract(value,'$.price.output_usd_per_million') AS output_usd,
+ json_extract(value,'$.price.cached_input_usd_per_million') AS cached_usd,
+ json_extract(value,'$.price.long_context_threshold') AS threshold,
+ json_extract(value,'$.price.long_input_usd_per_million') AS long_input,
+ json_extract(value,'$.price.long_output_usd_per_million') AS long_output,
+ json_extract(value,'$.price.long_cached_input_usd_per_million') AS long_cached
+ FROM json_each(?)) `
+
+func (s *Store) ReportWithPrices(ctx context.Context, f Filter, prices map[string]config.ModelPrice) (Report, error) {
+	return s.ReportWithPricing(ctx, f, config.State{ModelPrices: prices})
+}
+
+func (s *Store) ReportWithPricing(ctx context.Context, f Filter, state config.State) (Report, error) {
+	if err := config.ValidateModelPrices(state.ModelPrices); err != nil {
+		return Report{}, err
+	}
+	if err := config.ValidatePriceCatalog(state.PriceCatalog); err != nil {
+		return Report{}, err
+	}
+	prefix := priceRelation
+	sums := aggregate + costAggregate
 	out := Report{From: f.From, To: f.To, All: f.All, TimezoneOffset: f.TimezoneOffset,
 		ByUser: []Group{}, ByKey: []Group{}, ByModel: []Group{}, ByUpstream: []Group{}, Daily: []Group{}, DailyByModel: []DailyModel{}}
 	where, args := []string{"1=1"}, []any{}
@@ -318,13 +371,47 @@ func (s *Store) Report(ctx context.Context, f Filter) (Report, error) {
 			where, args = append(where, field.name+"=?"), append(args, field.value)
 		}
 	}
-	clause := " FROM requests WHERE " + strings.Join(where, " AND ")
+	baseClause := " FROM requests WHERE " + strings.Join(where, " AND ")
+	clause := " FROM requests LEFT JOIN prices ON requests.model=prices.price_model AND requests.upstream_id=prices.price_upstream WHERE " + strings.Join(where, " AND ")
 	tx, err := s.reader.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return out, err
 	}
 	defer tx.Rollback()
-	if err = tx.QueryRowContext(ctx, "SELECT "+aggregate+clause, args...).Scan(destinations(&out.Totals)...); err != nil {
+	// Resolve only model/upstream pairs present in this authorized snapshot.
+	// One JSON parameter avoids SQLite bind limits and SQL interpolation.
+	pairs, err := tx.QueryContext(ctx, "SELECT DISTINCT model,upstream_id"+baseClause+" ORDER BY model,upstream_id", args...)
+	if err != nil {
+		return out, err
+	}
+	type pricedPair struct {
+		Model    string            `json:"model"`
+		Upstream string            `json:"upstream"`
+		Price    config.ModelPrice `json:"price"`
+	}
+	prices := []pricedPair{}
+	resolve := config.NewPriceResolver(state)
+	for pairs.Next() {
+		var model, upstream string
+		if err = pairs.Scan(&model, &upstream); err != nil {
+			pairs.Close()
+			return out, err
+		}
+		if price, known := resolve(model, upstream); known {
+			prices = append(prices, pricedPair{model, upstream, price})
+		}
+	}
+	err = pairs.Err()
+	pairs.Close()
+	if err != nil {
+		return out, err
+	}
+	data, err := json.Marshal(prices)
+	if err != nil {
+		return out, err
+	}
+	args = append([]any{string(data)}, args...)
+	if err = tx.QueryRowContext(ctx, prefix+"SELECT "+sums+clause, args...).Scan(costDestinations(&out.Totals, &out.Cost)...); err != nil {
 		return out, err
 	}
 	day := fmt.Sprintf("strftime('%%Y-%%m-%%d',started_at/1000,'unixepoch','%+d minutes')", f.TimezoneOffset)
@@ -339,13 +426,13 @@ func (s *Store) Report(ctx context.Context, f Filter) (Report, error) {
 		{day, day, "''", &out.Daily},
 	}
 	for _, d := range dimensions {
-		rows, err := tx.QueryContext(ctx, "SELECT "+d.id+","+d.name+","+d.owner+","+aggregate+clause+" GROUP BY "+d.id+" ORDER BY "+d.id, args...)
+		rows, err := tx.QueryContext(ctx, prefix+"SELECT "+d.id+","+d.name+","+d.owner+","+sums+clause+" GROUP BY "+d.id+" ORDER BY "+d.id, args...)
 		if err != nil {
 			return out, err
 		}
 		for rows.Next() {
 			var g Group
-			if err = rows.Scan(append([]any{&g.ID, &g.Name, &g.UserID}, destinations(&g.Totals)...)...); err != nil {
+			if err = rows.Scan(append([]any{&g.ID, &g.Name, &g.UserID}, costDestinations(&g.Totals, &g.Cost)...)...); err != nil {
 				rows.Close()
 				return out, err
 			}
@@ -359,13 +446,13 @@ func (s *Store) Report(ctx context.Context, f Filter) (Report, error) {
 	}
 	// Use the same transaction, timezone and authorization filters as every
 	// other dimension. Missing usage remains distinct from a reported zero.
-	rows, err := tx.QueryContext(ctx, "SELECT "+day+",model,"+aggregate+clause+" GROUP BY "+day+",model ORDER BY "+day+",model", args...)
+	rows, err := tx.QueryContext(ctx, prefix+"SELECT "+day+",model,"+sums+clause+" GROUP BY "+day+",model ORDER BY "+day+",model", args...)
 	if err != nil {
 		return out, err
 	}
 	for rows.Next() {
 		var g DailyModel
-		if err = rows.Scan(append([]any{&g.Date, &g.Model}, destinations(&g.Totals)...)...); err != nil {
+		if err = rows.Scan(append([]any{&g.Date, &g.Model}, costDestinations(&g.Totals, &g.Cost)...)...); err != nil {
 			rows.Close()
 			return out, err
 		}

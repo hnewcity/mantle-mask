@@ -12,10 +12,21 @@ export type UsageTotals = {
   requests: number; errors: number; input_tokens: number; output_tokens: number; total_tokens: number;
   cached_tokens: number; reasoning_tokens: number; known_usage_requests: number; missing_usage_requests: number; in_flight_requests: number; pending_sync_requests?: number;
 }
-export type UsageGroup = UsageTotals & { id: string; name: string; user_id?: string }
-export type DailyModelUsage = UsageTotals & { date: string; model: string }
+export type UsageCost = { estimated_usd: number; priced_requests: number; unpriced_requests: number }
+export type ModelPrice = {
+  input_usd_per_million: number; output_usd_per_million: number; cached_input_usd_per_million?: number;
+  long_context_threshold?: number; long_input_usd_per_million?: number; long_output_usd_per_million?: number; long_cached_input_usd_per_million?: number;
+}
+export type ReferencePrice = { model: string; region: string; source: "aws" | "litellm" | "models.dev" | "aws+litellm"; updated_at: string; price: ModelPrice }
+export type PriceCatalog = {
+  updated_at: string; entries: ReferencePrice[]; warnings: string[];
+  sources: { source: string; region?: string; success: boolean; models: number; error?: string }[];
+}
+export type ModelPrices = Record<string, ModelPrice>
+export type UsageGroup = UsageTotals & { id: string; name: string; user_id?: string; cost?: UsageCost }
+export type DailyModelUsage = UsageTotals & { date: string; model: string; cost?: UsageCost }
 export type UsageReport = {
-  from: string; to: string; all: boolean; timezone_offset: number; totals: UsageTotals;
+  from: string; to: string; all: boolean; timezone_offset: number; totals: UsageTotals; cost?: UsageCost;
   by_user: UsageGroup[]; by_key: UsageGroup[]; by_model: UsageGroup[]; by_upstream?: UsageGroup[]; daily: UsageGroup[]; daily_by_model?: DailyModelUsage[];
 }
 export type Settings = { request_timeout_seconds: number; max_retries: number; cooldown_seconds: number; log_capacity: number; allow_http_upstreams: boolean }

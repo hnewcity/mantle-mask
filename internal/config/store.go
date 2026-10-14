@@ -90,11 +90,13 @@ type Settings struct {
 }
 
 type State struct {
-	Version   int        `json:"version"`
-	Upstreams []Upstream `json:"upstreams"`
-	APIKeys   []APIKey   `json:"api_keys"`
-	Users     []User     `json:"users"`
-	Settings  Settings   `json:"settings"`
+	Version      int                   `json:"version"`
+	Upstreams    []Upstream            `json:"upstreams"`
+	APIKeys      []APIKey              `json:"api_keys"`
+	Users        []User                `json:"users"`
+	Settings     Settings              `json:"settings"`
+	ModelPrices  map[string]ModelPrice `json:"model_prices,omitempty"`
+	PriceCatalog *PriceCatalog         `json:"price_catalog,omitempty"`
 }
 
 type Store struct {
@@ -158,6 +160,12 @@ func Open(dir, masterKey string) (*Store, error) {
 		}
 		if err == nil {
 			err = ValidateSettings(s.state.Settings)
+		}
+		if err == nil {
+			err = ValidateModelPrices(s.state.ModelPrices)
+		}
+		if err == nil {
+			err = ValidatePriceCatalog(s.state.PriceCatalog)
 		}
 		for _, u := range s.state.Upstreams {
 			if err != nil {

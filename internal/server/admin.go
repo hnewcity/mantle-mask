@@ -103,3 +103,44 @@ func (s *Server) saveSettings(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, input)
 }
+
+func (s *Server) saveModelPrices(c *gin.Context) {
+	var input map[string]config.ModelPrice
+	if !decode(c, &input) {
+		return
+	}
+	if input == nil {
+		abortError(c, http.StatusBadRequest, "invalid_model_prices", "Model prices must be an object.")
+		return
+	}
+	if err := s.store.UpdateModelPrices(input); err != nil {
+		abortError(c, http.StatusBadRequest, "invalid_model_prices", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, input)
+}
+
+func (s *Server) synchronizeModelPrices(c *gin.Context) {
+	if !s.pricingSyncMu.TryLock() {
+		abortError(c, http.StatusConflict, "price_sync_in_progress", "Price synchronization is already running.")
+		return
+	}
+	defer s.pricingSyncMu.Unlock()
+	state := s.store.Snapshot()
+	regions := []string{}
+	for _, u := range state.Upstreams {
+		if region := config.PricingRegion(u); region != "" {
+			regions = append(regions, region)
+		}
+	}
+	catalog, err := s.syncPrices(c.Request.Context(), state.PriceCatalog, regions)
+	if err != nil {
+		abortError(c, http.StatusBadGateway, "price_sync_failed", err.Error())
+		return
+	}
+	if err := s.store.UpdatePriceCatalog(catalog); err != nil {
+		abortError(c, http.StatusServiceUnavailable, "price_storage_failed", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, catalog)
+}

@@ -1,11 +1,24 @@
 // Isolated test fixture. Never use these credentials or ports for deployment.
 import { createServer } from "node:http"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { spawn } from "node:child_process"
+import { randomBytes } from "node:crypto"
 
 const dir = await mkdtemp(path.join(tmpdir(), "mantle-mask-e2e-"))
+// Synthetic reference prices exercise the real report pipeline without public
+// pricing downloads or AWS inference. This model exists only in test fixtures.
+const fixtureTime = new Date().toISOString()
+await writeFile(path.join(dir, "master.key"), randomBytes(32), { mode: 0o600 })
+await writeFile(path.join(dir, "config.json"), JSON.stringify({
+  version: 2, upstreams: [], api_keys: [], users: [{ id: "usr_default", name: "默认用户", note: "", enabled: true, created_at: fixtureTime }],
+  settings: { request_timeout_seconds: 300, max_retries: 2, cooldown_seconds: 30, log_capacity: 1000, allow_http_upstreams: false },
+  price_catalog: { updated_at: fixtureTime, sources: [{ source: "aws", success: true, models: 2 }], warnings: [], entries: [
+    { model: "e2e.reference-model", region: "us-east-1", source: "aws", updated_at: fixtureTime, price: { input_usd_per_million: 1, output_usd_per_million: 2 } },
+    { model: "e2e.reference-model", region: "us-west-2", source: "aws", updated_at: fixtureTime, price: { input_usd_per_million: 3, output_usd_per_million: 4 } },
+  ] },
+}), { mode: 0o600 })
 const markdownAnswer = [
   "# Markdown 回复",
   "正文包含 **加粗**、*斜体*、~~删除线~~ 和 `inline code`。",
