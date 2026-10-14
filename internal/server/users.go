@@ -9,6 +9,8 @@ import (
 )
 
 func (s *Server) session(c *gin.Context) {
+	s.store.Coordinator().RLock()
+	defer s.store.Coordinator().RUnlock()
 	token := bearer(c.Request)
 	if s.isAdmin(token) {
 		c.JSON(http.StatusOK, gin.H{"role": "admin", "version": "0.2.0"})

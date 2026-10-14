@@ -13,7 +13,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/hnewcity/mantle-mask/internal/backup"
 	"github.com/hnewcity/mantle-mask/internal/config"
@@ -31,7 +30,7 @@ func exportFile(t *testing.T, f *fixture) []byte {
 	return read(t, response, 200)
 }
 
-func restoreFile(t *testing.T, f *fixture, data []byte, password, confirm, token string, status int) []byte {
+func restoreFile(t *testing.T, f *fixture, data []byte, password, confirm, token string, status int, modes ...string) []byte {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -47,6 +46,11 @@ func restoreFile(t *testing.T, f *fixture, data []byte, password, confirm, token
 	}
 	if err = writer.WriteField("confirm", confirm); err != nil {
 		t.Fatal(err)
+	}
+	if len(modes) > 0 {
+		if err = writer.WriteField("mode", modes[0]); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err = writer.Close(); err != nil {
 		t.Fatal(err)
@@ -194,53 +198,7 @@ func TestBackupValidationAndAuthorizationNeverMutateData(t *testing.T) {
 	}
 }
 
-func TestBackupRejectsWhileStreamIsInFlight(t *testing.T) {
-	f := setup(t)
-	started, release := make(chan struct{}), make(chan struct{})
-	mock := upstream(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, "data: {\"choices\":[]}\n\n")
-		w.(http.Flusher).Flush()
-		close(started)
-		<-release
-		io.WriteString(w, "data: [DONE]\n\n")
-	})
-	f.add("stream", mock.URL+"/v1", "key", 1, nil)
-	archive := exportFile(t, f)
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		response := f.request("POST", "/v1/chat/completions", f.token, `{"model":"test","messages":[],"stream":true}`, nil)
-		defer response.Body.Close()
-		_, _ = io.Copy(io.Discard, response.Body)
-	}()
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("stream did not start")
-	}
-	func() {
-		defer close(release)
-		read(t, f.request("POST", "/api/admin/backup/export", adminTestToken, `{"password":"`+backupPassword+`"}`, nil), 409)
-		restoreFile(t, f, archive, backupPassword, "RESTORE", adminTestToken, 409)
-	}()
-	<-finished
-	exportFile(t, f)
-}
-
-func TestMigrationLockRejectsRequestsWithoutBlocking(t *testing.T) {
-	f := setup(t)
-	handler := New(f.store, f.proxy, adminTestToken, "")
-	handler.migrationMu.Lock()
-	defer handler.migrationMu.Unlock()
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest("GET", "/api/admin/settings", nil))
-	if recorder.Code != 503 || recorder.Header().Get("Retry-After") != "5" {
-		t.Fatal("requests should fail fast during migration")
-	}
-}
-
-func TestRestoreWriteFailureStopsTrafficUntilRestartRecovery(t *testing.T) {
+func TestRestoreWriteFailureKeepsTrafficAndResumesOnRestart(t *testing.T) {
 	f := setup(t)
 	archive := exportFile(t, f)
 	blocked := filepath.Join(f.dir, "affinity.json")
@@ -248,9 +206,9 @@ func TestRestoreWriteFailureStopsTrafficUntilRestartRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	restoreFile(t, f, archive, backupPassword, "RESTORE", adminTestToken, 500)
-	read(t, f.request("GET", "/api/admin/settings", adminTestToken, "", nil), 503)
-	read(t, f.request("GET", "/api/me", f.token, "", nil), 503)
-	read(t, f.request("POST", "/api/admin/backup/export", adminTestToken, `{"password":"`+backupPassword+`"}`, nil), 503)
+	read(t, f.request("GET", "/api/admin/settings", adminTestToken, "", nil), 200)
+	read(t, f.request("GET", "/api/me", f.token, "", nil), 200)
+	read(t, f.request("POST", "/api/admin/backup/export", adminTestToken, `{"password":"`+backupPassword+`"}`, nil), 409)
 	if err := os.Remove(blocked); err != nil {
 		t.Fatal(err)
 	}

@@ -11,13 +11,12 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/hnewcity/mantle-mask/internal/config"
 	"github.com/hnewcity/mantle-mask/internal/usage"
 )
 
 // Backup includes all persistent application state, not ephemeral health/cache/logs.
-// The HTTP layer must hold its exclusive migration lock while taking/applying it.
+// Snapshot pinning coordinates only short state mutations, not request lifetimes.
 type Backup struct {
 	Format    string               `json:"format"`
 	Version   int                  `json:"version"`
@@ -28,28 +27,48 @@ type Backup struct {
 }
 
 type restoreJournal struct {
-	Version  int                `json:"version"`
-	Config   config.State       `json:"config"`
-	Usage    usage.Backup       `json:"usage"`
-	Affinity map[string]Binding `json:"affinity"`
+	UsageOnly bool               `json:"usage_only,omitempty"`
+	Version   int                `json:"version"`
+	Config    config.State       `json:"config"`
+	Usage     usage.Backup       `json:"usage"`
+	Affinity  map[string]Binding `json:"affinity"`
 }
 
 func (g *Gateway) ExportBackup(ctx context.Context) (Backup, error) {
-	out := Backup{Format: "mantle-mask", Version: 1, CreatedAt: time.Now().UTC()}
-	var err error
-	if out.Config, err = g.store.Export(); err != nil {
+	out := Backup{Format: "mantle-mask", Version: 2}
+	// Reserve a reader outside the checkpoint; a busy reporting pool must not
+	// hold up active accounting while waiting for a connection.
+	view, err := g.usage.PrepareSnapshot(ctx)
+	if err != nil {
 		return out, err
 	}
-	if out.Usage, err = g.usage.Export(ctx); err != nil {
+	defer view.Close()
+	err = func() error {
+		gate := g.store.Coordinator()
+		gate.Lock()
+		defer gate.Unlock()
+		if err := view.Pin(ctx); err != nil {
+			return err
+		}
+		out.CreatedAt = time.Now().UTC()
+		var err error
+		if out.Config, err = g.store.Export(); err != nil {
+			return err
+		}
+		g.affinity.mu.Lock()
+		defer g.affinity.mu.Unlock()
+		out.Affinity = make(map[string]Binding, len(g.affinity.bindings))
+		for k, v := range g.affinity.bindings {
+			out.Affinity[k] = v
+		}
+		return nil
+	}()
+	if err != nil {
 		return out, err
 	}
-	g.affinity.mu.Lock()
-	defer g.affinity.mu.Unlock()
-	out.Affinity = make(map[string]Binding, len(g.affinity.bindings))
-	for k, v := range g.affinity.bindings {
-		out.Affinity[k] = v
-	}
-	return out, nil
+	// WAL retains the pinned database view while new requests keep writing.
+	out.Usage, err = view.Export(ctx)
+	return out, err
 }
 
 func DecodeBackup(data []byte) (Backup, error) {
@@ -65,9 +84,9 @@ func DecodeBackup(data []byte) (Backup, error) {
 	return out, nil
 }
 
-func (g *Gateway) PrepareBackup(in Backup) (restoreJournal, error) {
+func (g *Gateway) PrepareBackup(in Backup, usageOnly ...bool) (restoreJournal, error) {
 	var out restoreJournal
-	if in.Format != "mantle-mask" || in.Version != 1 || in.CreatedAt.IsZero() || in.Affinity == nil || len(in.Affinity) > 100000 {
+	if in.Format != "mantle-mask" || (in.Version != 1 && in.Version != 2) || in.CreatedAt.IsZero() || in.Affinity == nil || len(in.Affinity) > 100000 {
 		return out, errors.New("备份版本不受支持或缺少必要数据")
 	}
 	if err := in.Usage.Validate(); err != nil {
@@ -83,7 +102,21 @@ func (g *Gateway) PrepareBackup(in Backup) (restoreJournal, error) {
 	if err != nil {
 		return out, err
 	}
-	return restoreJournal{Version: 1, Config: st, Usage: in.Usage, Affinity: in.Affinity}, nil
+	if err := g.usage.ValidateMerge(context.Background(), in.Usage); err != nil {
+		return out, err
+	}
+	g.affinity.mu.Lock()
+	count := len(g.affinity.bindings)
+	for scope := range in.Affinity {
+		if _, ok := g.affinity.bindings[scope]; !ok {
+			count++
+		}
+	}
+	g.affinity.mu.Unlock()
+	if count > 100000 {
+		return out, errors.New("合并后的 Responses 路由超过容量限制")
+	}
+	return restoreJournal{Version: 2, Config: st, Usage: in.Usage, Affinity: in.Affinity, UsageOnly: len(usageOnly) > 0 && usageOnly[0]}, nil
 }
 
 func (g *Gateway) restorePath() string {
@@ -93,7 +126,7 @@ func (g *Gateway) RestorePending() bool { return g.restorePending.Load() }
 
 // RestoreBackup journals the already-validated target state before changing any
 // live data. A failed/interrupted application is replayed idempotently on startup;
-// until then the HTTP server refuses all traffic rather than serve mixed state.
+// failed jobs remain resumable, without disabling the live request path.
 func (g *Gateway) RestoreBackup(in restoreJournal) error {
 	if err := config.AtomicJSON(g.restorePath(), in); err != nil {
 		return err
@@ -117,7 +150,7 @@ func (g *Gateway) recoverRestore() error {
 	if err := json.Unmarshal(data, &in); err != nil {
 		return err
 	}
-	if in.Version != 1 || in.Config.Version != 2 || in.Affinity == nil {
+	if (in.Version != 1 && in.Version != 2) || in.Config.Version != 2 || in.Affinity == nil {
 		return errors.New("invalid pending restore journal")
 	}
 	// Verify local journal credentials before writing any additional state.
@@ -131,7 +164,7 @@ func (g *Gateway) recoverRestore() error {
 		portable.Credentials[u.ID] = c
 		portable.State.Upstreams[i].Secret = ""
 	}
-	if _, err := g.PrepareBackup(Backup{Format: "mantle-mask", Version: 1, CreatedAt: time.Now().UTC(), Config: portable, Usage: in.Usage, Affinity: in.Affinity}); err != nil {
+	if _, err := g.store.PrepareImport(portable); err != nil {
 		return err
 	}
 	g.restorePending.Store(true)
@@ -139,23 +172,40 @@ func (g *Gateway) recoverRestore() error {
 }
 
 func (g *Gateway) applyRestore(in restoreJournal) error {
-	// Do not inherit HTTP cancellation once the durable journal is committed.
-	if err := g.usage.Restore(context.Background(), in.Usage); err != nil {
-		return err
+	// Once journaled, a disconnected browser must not abandon a partially applied job.
+	ctx := context.Background()
+	if in.Version == 1 {
+		// Resume backups written by the old, stop-the-world implementation at startup.
+		if err := g.usage.Restore(ctx, in.Usage); err != nil {
+			return err
+		}
+		if err := g.store.RestoreWith(in.Config, func() error {
+			g.affinity.mu.Lock()
+			defer g.affinity.mu.Unlock()
+			if err := config.AtomicJSON(g.affinity.path, in.Affinity); err != nil {
+				return err
+			}
+			g.affinity.bindings = in.Affinity
+			return nil
+		}); err != nil {
+			return err
+		}
+	} else {
+		if err := g.usage.Merge(ctx, in.Usage); err != nil {
+			return err
+		}
+		if in.UsageOnly {
+			gate := g.store.Coordinator()
+			gate.Lock()
+			err := g.mergeAffinity(in.Affinity)
+			gate.Unlock()
+			if err != nil {
+				return err
+			}
+		} else if err := g.store.RestoreWith(in.Config, func() error { return g.mergeAffinity(in.Affinity) }); err != nil {
+			return err
+		}
 	}
-	if err := g.store.Restore(in.Config); err != nil {
-		return err
-	}
-	g.affinity.mu.Lock()
-	err := config.AtomicJSON(g.affinity.path, in.Affinity)
-	if err == nil {
-		g.affinity.bindings = in.Affinity
-	}
-	g.affinity.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	// Persist both JSON renames before removing the redo journal.
 	if err := g.syncRestoreDirectory(); err != nil {
 		return err
 	}
@@ -165,12 +215,31 @@ func (g *Gateway) applyRestore(in restoreJournal) error {
 	if err := g.syncRestoreDirectory(); err != nil {
 		return err
 	}
-	g.runtime = newRuntime()
-	g.credentialMu.Lock()
-	g.providers = map[string]aws.CredentialsProvider{}
-	g.credentialMu.Unlock()
-	g.client.CloseIdleConnections()
+	// Keep runtime/provider objects alive: active streams still use them. Caches
+	// already include endpoint/credential fingerprints, so new config is isolated.
 	g.restorePending.Store(false)
+	return nil
+}
+
+// Caller holds the checkpoint. Existing bindings win conflicts, just like usage
+// links, so importing history cannot redirect a response created on this target.
+func (g *Gateway) mergeAffinity(in map[string]Binding) error {
+	g.affinity.mu.Lock()
+	defer g.affinity.mu.Unlock()
+	merged := make(map[string]Binding, len(g.affinity.bindings)+len(in))
+	for k, v := range in {
+		merged[k] = v
+	}
+	for k, v := range g.affinity.bindings {
+		merged[k] = v
+	}
+	if len(merged) > 100000 {
+		return errors.New("合并后的 Responses 路由超过容量限制")
+	}
+	if err := config.AtomicJSON(g.affinity.path, merged); err != nil {
+		return err
+	}
+	g.affinity.bindings = merged
 	return nil
 }
 

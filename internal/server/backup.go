@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,18 +20,9 @@ func (s *Server) beginBackup(c *gin.Context) bool {
 		abortError(c, http.StatusConflict, "backup_busy", "另一个备份或恢复任务正在执行，请稍后重试。")
 		return false
 	}
-	return true
-}
-
-func (s *Server) lockMigration(c *gin.Context) bool {
-	if !s.migrationMu.TryLock() {
-		abortError(c, http.StatusConflict, "gateway_busy", "仍有请求正在执行，请暂停 API 流量并等待流式请求结束后重试。")
-		return false
-	}
-	// A previous failed restore may have become pending during file upload.
 	if s.gateway.RestorePending() {
-		s.migrationMu.Unlock()
-		abortError(c, http.StatusServiceUnavailable, "restore_pending", "恢复尚未完成，请检查磁盘空间与权限并重启服务。")
+		s.backupMu.Unlock()
+		abortError(c, http.StatusConflict, "restore_pending", "之前的恢复尚未完成。现有请求继续处理；请检查磁盘空间与权限并重启以继续恢复。")
 		return false
 	}
 	return true
@@ -51,13 +43,7 @@ func (s *Server) exportBackup(c *gin.Context) {
 		abortError(c, http.StatusBadRequest, "invalid_password", err.Error())
 		return
 	}
-	if !s.lockMigration(c) {
-		return
-	}
-	snapshot, err := func() (gateway.Backup, error) {
-		defer s.migrationMu.Unlock()
-		return s.gateway.ExportBackup(c.Request.Context())
-	}()
+	snapshot, err := s.gateway.ExportBackup(c.Request.Context())
 	if err != nil {
 		if errors.Is(err, backup.ErrTooLarge) {
 			abortError(c, http.StatusRequestEntityTooLarge, "backup_too_large", err.Error())
@@ -103,7 +89,7 @@ func (s *Server) restoreBackup(c *gin.Context) {
 	}
 	defer c.Request.MultipartForm.RemoveAll()
 	if c.PostForm("confirm") != "RESTORE" {
-		abortError(c, http.StatusBadRequest, "confirmation_required", "请确认覆盖当前实例的全部配置和用量。")
+		abortError(c, http.StatusBadRequest, "confirmation_required", "请确认恢复配置并合并用量，或仅补齐用量。")
 		return
 	}
 	password := c.PostForm("password")
@@ -138,23 +124,40 @@ func (s *Server) restoreBackup(c *gin.Context) {
 		abortError(c, http.StatusBadRequest, "invalid_backup", err.Error())
 		return
 	}
-	prepared, err := s.gateway.PrepareBackup(snapshot)
+	mode := c.PostForm("mode")
+	if mode != "" && mode != "full" && mode != "usage" {
+		abortError(c, http.StatusBadRequest, "invalid_restore_mode", "不支持的恢复模式。")
+		return
+	}
+	usageOnly := mode == "usage"
+	prepared, err := s.gateway.PrepareBackup(snapshot, usageOnly)
 	if err != nil {
 		abortError(c, http.StatusBadRequest, "invalid_backup", "备份数据校验失败："+err.Error())
 		return
 	}
-	if !s.lockMigration(c) {
-		return
-	}
-	defer s.migrationMu.Unlock()
 	if err := s.gateway.RestoreBackup(prepared); err != nil {
 		slog.Error("backup restore failed", "error", err)
 		text := "无法写入恢复数据，当前数据未修改。请检查磁盘空间与权限。"
 		if s.gateway.RestorePending() {
-			text = "恢复未完成，服务已暂停接收请求。请检查磁盘空间与权限并重启服务，恢复任务会自动继续。"
+			text = "恢复未完成，已合并的用量会保留，现有请求不会因恢复任务被停用。请检查磁盘空间与权限并重启服务，任务将幂等继续。"
 		}
 		abortError(c, http.StatusInternalServerError, "restore_failed", text)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"restored": true, "users": len(snapshot.Config.State.Users), "api_keys": len(snapshot.Config.State.APIKeys), "upstreams": len(snapshot.Config.State.Upstreams), "usage_requests": len(snapshot.Usage.Requests)})
+	c.JSON(http.StatusOK, gin.H{"restored": true, "usage_only": usageOnly, "snapshot_at": snapshot.CreatedAt, "users": len(snapshot.Config.State.Users), "api_keys": len(snapshot.Config.State.APIKeys), "upstreams": len(snapshot.Config.State.Upstreams), "usage_requests": len(snapshot.Usage.Requests)})
+}
+
+// Never disable inference for a migration job. Only configuration mutations are
+// held off while a redo journal is pending, so recovery cannot discard new edits.
+func (s *Server) guardPendingRestore(c *gin.Context) {
+	if !s.gateway.RestorePending() || c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
+		return
+	}
+	path := strings.TrimPrefix(c.Request.URL.Path, "/api/admin/")
+	for _, prefix := range []string{"users", "keys", "upstreams", "settings"} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			abortError(c, http.StatusConflict, "restore_pending", "恢复任务尚未完成，暂不能修改配置；API 请求和查询不受此限制。")
+			return
+		}
+	}
 }

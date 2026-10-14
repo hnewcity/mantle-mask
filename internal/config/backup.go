@@ -98,3 +98,20 @@ func backupID(id string) bool {
 func (s *Store) Restore(st State) error {
 	return s.transaction(func(next *State) error { *next = st; return nil })
 }
+
+// RestoreWith publishes configuration and companion routing at one checkpoint.
+// Existing requests retain their captured State and original encrypted secrets.
+func (s *Store) RestoreWith(st State, companion func() error) error {
+	s.checkpoint.Lock()
+	defer s.checkpoint.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := AtomicJSON(s.path, st); err != nil {
+		return err
+	}
+	if err := companion(); err != nil {
+		return err
+	}
+	s.state = st
+	return nil
+}

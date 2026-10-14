@@ -15,15 +15,14 @@ import (
 )
 
 type Server struct {
-	migrationMu sync.RWMutex
-	backupMu    sync.Mutex
-	store       *config.Store
-	gateway     *gateway.Gateway
-	adminHash   string
-	cors        map[string]bool
-	files       http.Handler
-	assets      fs.FS
-	router      *gin.Engine
+	backupMu  sync.Mutex
+	store     *config.Store
+	gateway   *gateway.Gateway
+	adminHash string
+	cors      map[string]bool
+	files     http.Handler
+	assets    fs.FS
+	router    *gin.Engine
 }
 
 func New(store *config.Store, proxy *gateway.Gateway, adminToken, origins string) *Server {
@@ -45,23 +44,6 @@ func New(store *config.Store, proxy *gateway.Gateway, adminToken, origins string
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Backup endpoints serialize separately and acquire the exclusive lock only
-	// for snapshot/apply. Normal traffic never queues behind a long restore.
-	backupRoute := r.Method == http.MethodPost && (r.URL.Path == "/api/admin/backup/export" || r.URL.Path == "/api/admin/backup/restore")
-	if !backupRoute {
-		if !s.migrationMu.TryRLock() {
-			w.Header().Set("Retry-After", "5")
-			w.Header().Set("Cache-Control", "no-store")
-			gateway.Error(w, http.StatusServiceUnavailable, "migration_in_progress", "正在备份或恢复，请稍后重试。")
-			return
-		}
-		defer s.migrationMu.RUnlock()
-	}
-	if s.gateway.RestorePending() {
-		w.Header().Set("Cache-Control", "no-store")
-		gateway.Error(w, http.StatusServiceUnavailable, "restore_pending", "恢复尚未完成，请检查磁盘空间与权限并重启服务以完成恢复。")
-		return
-	}
 	s.router.ServeHTTP(w, r)
 }
 
@@ -73,7 +55,7 @@ func (s *Server) routes() {
 	api := s.router.Group("/api")
 	api.GET("/session", s.session)
 
-	admin := api.Group("/admin", s.requireAdmin)
+	admin := api.Group("/admin", s.requireAdmin, s.guardPendingRestore)
 	admin.GET("/session", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "authenticated", "role": "admin", "version": "0.2.0"})
 	})
@@ -117,8 +99,15 @@ func (s *Server) routes() {
 
 func (s *Server) proxy(c *gin.Context) {
 	key := currentKey(c)
-	user, _ := s.store.User(key.UserID)
-	s.gateway.Proxy(c.Writer, c.Request, gateway.Principal{ID: key.ID, Name: key.Name, UserID: user.ID, UserName: user.Name})
+	st := c.MustGet(gatewayStateContext).(config.State)
+	var user config.User
+	for _, u := range st.Users {
+		if u.ID == key.UserID {
+			user = u
+			break
+		}
+	}
+	s.gateway.ProxyWithState(c.Writer, c.Request, gateway.Principal{ID: key.ID, Name: key.Name, UserID: user.ID, UserName: user.Name}, st)
 }
 
 func (s *Server) playground(c *gin.Context) {

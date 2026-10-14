@@ -48,6 +48,7 @@ func New(store *config.Store, dir string) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
+	accounting.SetCoordinator(store.Coordinator())
 	transport := &http.Transport{
 		Proxy:             http.ProxyFromEnvironment,
 		DialContext:       (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -112,6 +113,13 @@ func (g *Gateway) Usage(ctx context.Context, f usage.Filter) (usage.Report, erro
 }
 func (g *Gateway) Metrics() Metrics {
 	m := g.runtime.metrics()
+	health := map[string]Health{}
+	for _, u := range g.store.Snapshot().Upstreams {
+		if h, ok := m.Health[healthKey(u)]; ok {
+			health[u.ID] = h
+		}
+	}
+	m.Health = health
 	m.UsageStorageHealthy = g.usage.Healthy()
 	return m
 }
@@ -126,7 +134,7 @@ func (g *Gateway) TestUpstream(ctx context.Context, id string) ([]Model, error) 
 	return nil, errors.New("upstream not found")
 }
 
-func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
+func (g *Gateway) models(w http.ResponseWriter, r *http.Request, st config.State) {
 	// Keep discovery workers inside the request lifetime, including cancellation,
 	// so a subsequent migration cannot race late cache/credential writes.
 	var workers sync.WaitGroup
@@ -139,7 +147,7 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 	limit := make(chan struct{}, 4)
 	count := 0
 	project := r.Header.Get("OpenAI-Project")
-	for _, u := range g.store.Snapshot().Upstreams {
+	for _, u := range st.Upstreams {
 		if !u.Enabled {
 			continue
 		}
@@ -200,13 +208,16 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, principal Principal) {
+	g.ProxyWithState(w, r, principal, g.store.Snapshot())
+}
+
+func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, principal Principal, st config.State) {
 	path := strings.TrimPrefix(r.URL.Path, "/v1")
-	st := g.store.Snapshot()
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(st.Settings.RequestTimeoutSeconds)*time.Second)
 	defer cancel()
 	r = r.WithContext(ctx)
 	if path == "/models" && r.Method == http.MethodGet {
-		g.models(w, r)
+		g.models(w, r, st)
 		return
 	}
 	if !validRoute(r.Method, path) {
@@ -360,7 +371,7 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, principal Princi
 		resp, err := g.upstreamRequest(ctx, u, r.Method, path, r.URL.RawQuery, payload, r.Header, project)
 		if err != nil {
 			lastStatus, lastCode, lastBody = 502, "upstream_connection_failed", nil
-			g.runtime.mark(u.ID, 502, time.Since(attemptStart), time.Duration(st.Settings.CooldownSeconds)*time.Second, "连接或鉴权失败")
+			g.runtime.mark(u, 502, time.Since(attemptStart), time.Duration(st.Settings.CooldownSeconds)*time.Second, "连接或鉴权失败")
 			if ctx.Err() != nil || pinned != "" {
 				break
 			}
@@ -372,7 +383,7 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, principal Princi
 		} else if until, err := http.ParseTime(resp.Header.Get("Retry-After")); err == nil {
 			cooldown = max(cooldown, min(time.Until(until), 10*time.Minute))
 		}
-		g.runtime.mark(u.ID, resp.StatusCode, time.Since(attemptStart), cooldown, "")
+		g.runtime.mark(u, resp.StatusCode, time.Since(attemptStart), cooldown, "")
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			lastStatus, lastCode, lastHeaders = resp.StatusCode, "upstream_error", resp.Header
 			raw, _ := boundedRead(resp.Body, 1<<20)
@@ -404,14 +415,15 @@ func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, principal Princi
 		if strings.HasPrefix(path, "/responses") {
 			obs.onResponse = func(id string) error {
 				responseScope = scopeKey(principal.ID, requestedProject, id)
+				requestID := ""
 				if accounted {
-					if err := g.usage.Bind(responseScope, log.ID); err != nil {
-						return err
-					}
+					requestID = log.ID
 				}
-				return g.affinity.put(responseScope, Binding{
-					UpstreamID: u.ID, Fingerprint: fingerprint(u), Model: log.Model,
-					Project: project, Expires: time.Now().UTC().Add(30 * 24 * time.Hour),
+				return g.usage.BindWith(responseScope, requestID, func() error {
+					return g.affinity.put(responseScope, Binding{
+						UpstreamID: u.ID, Fingerprint: fingerprint(u), Model: log.Model,
+						Project: project, Expires: time.Now().UTC().Add(30 * 24 * time.Hour),
+					})
 				})
 			}
 		}

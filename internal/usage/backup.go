@@ -39,15 +39,48 @@ func (s *Store) Export(ctx context.Context) (Backup, error) {
 	return s.export(ctx, backup.MaxSize)
 }
 
+type Snapshot struct{ tx *sql.Tx }
+
+// PinSnapshot establishes the WAL view now, not on its first later SELECT.
+// The gateway briefly holds the shared checkpoint while calling this method.
+func (s *Store) PrepareSnapshot(ctx context.Context) (*Snapshot, error) {
+	tx, err := s.reader.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	return &Snapshot{tx: tx}, nil
+}
+func (v *Snapshot) Pin(ctx context.Context) error {
+	var id string
+	err := v.tx.QueryRowContext(ctx, "SELECT id FROM requests LIMIT 1").Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	return err
+}
+func (v *Snapshot) Close()                                     { _ = v.tx.Rollback() }
+func (v *Snapshot) Export(ctx context.Context) (Backup, error) { return v.export(ctx, backup.MaxSize) }
+
 func (s *Store) export(ctx context.Context, limit int) (Backup, error) {
+	view, err := s.PrepareSnapshot(ctx)
+	if err != nil {
+		return Backup{}, err
+	}
+	defer view.Close()
+	s.coordinator.Lock()
+	err = view.Pin(ctx)
+	s.coordinator.Unlock()
+	if err != nil {
+		return Backup{}, err
+	}
+	return view.export(ctx, limit)
+}
+
+func (v *Snapshot) export(ctx context.Context, limit int) (Backup, error) {
 	// Bound collection before materializing an arbitrarily large usage database.
 	used := len(`{"requests":[],"response_links":{}}`)
 	out := Backup{Requests: []BackupRequest{}, Links: map[string]string{}}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return out, err
-	}
-	defer tx.Rollback()
+	tx := v.tx
 	rows, err := tx.QueryContext(ctx, "SELECT "+backupColumns+" FROM requests ORDER BY id")
 	if err != nil {
 		return out, err

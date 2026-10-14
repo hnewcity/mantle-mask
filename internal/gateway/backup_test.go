@@ -93,3 +93,64 @@ func TestRestoreJournalResumesAfterFailure(t *testing.T) {
 		t.Fatal("recovery lost usage or affinity")
 	}
 }
+
+func TestSnapshotDoesNotSplitResponseUsageLinkAndAffinity(t *testing.T) {
+	dir := t.TempDir()
+	store, err := config.Open(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := New(store, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if err := g.usage.Begin(usage.Request{ID: "response-request", StartedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	scope := config.Hash("response-scope")
+	entered, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- g.usage.BindWith(scope, "response-request", func() error {
+			close(entered)
+			<-release
+			return g.affinity.put(scope, Binding{UpstreamID: "old-upstream", Fingerprint: config.Hash("old"), Expires: time.Now().Add(time.Hour)})
+		})
+	}()
+	<-entered
+	exported := make(chan Backup, 1)
+	errors := make(chan error, 1)
+	go func() { b, err := g.ExportBackup(context.Background()); exported <- b; errors <- err }()
+	select {
+	case <-exported:
+		close(release)
+		t.Fatal("snapshot split the routing event")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	snapshot := <-exported
+	if err := <-errors; err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Usage.Links[scope] != "response-request" || snapshot.Affinity[scope].UpstreamID != "old-upstream" {
+		t.Fatal("incoherent response snapshot")
+	}
+}
+
+func TestOldRequestCooldownCannotDisableRestoredCredentials(t *testing.T) {
+	runtime := newRuntime()
+	old := config.Upstream{ID: "upstream", BaseURL: "https://example.test/v1", AuthMode: "api_key", Secret: "old", Enabled: true, Weight: 1}
+	current := old
+	current.Secret = "restored"
+	runtime.mark(old, 503, 0, time.Minute, "old upstream failed")
+	if _, ok := runtime.choose([]config.Upstream{current}, "", map[string]bool{}, ""); !ok {
+		t.Fatal("old request poisoned restored upstream health")
+	}
+	if _, ok := runtime.choose([]config.Upstream{old}, "", map[string]bool{}, ""); ok {
+		t.Fatal("old generation lost its cooldown")
+	}
+}

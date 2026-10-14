@@ -139,7 +139,12 @@ func (s *runtimeState) requestLogs() []RequestLog {
 	return out
 }
 
-func (s *runtimeState) mark(id string, status int, elapsed time.Duration, cooldown time.Duration, message string) {
+func healthKey(u config.Upstream) string {
+	return config.Hash(u.ID + "\x00" + fingerprint(u) + "\x00" + u.Secret + "\x00" + u.SigningService)
+}
+
+func (s *runtimeState) mark(u config.Upstream, status int, elapsed time.Duration, cooldown time.Duration, message string) {
+	id := healthKey(u)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	h := s.health[id]
@@ -172,7 +177,7 @@ func (s *runtimeState) choose(upstreams []config.Upstream, model string, tried m
 				continue
 			}
 		}
-		if pinned == "" && time.Now().Before(s.health[u.ID].CooldownUntil) {
+		if pinned == "" && time.Now().Before(s.health[healthKey(u)].CooldownUntil) {
 			continue
 		}
 		candidates = append(candidates, u)

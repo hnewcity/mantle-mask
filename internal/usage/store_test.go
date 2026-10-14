@@ -240,7 +240,7 @@ func TestMigrateV1UsagePreservesHistoryAndResponseLinks(t *testing.T) {
 			t.Fatal(err)
 		}
 		var version int
-		if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+		if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
 			t.Fatalf("schema version %d: %v", version, err)
 		}
 		if err := s.Reconcile("legacy-scope", Counters{InputTokens: 12, OutputTokens: 24}); err != nil {

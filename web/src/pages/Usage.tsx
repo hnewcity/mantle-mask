@@ -122,6 +122,7 @@ export function Usage({ users = [], keys, upstreams = [], personal = false }: { 
         { title: "输出 Token", value: totals.output_tokens, hint: `已报告推理输出 ${number(totals.reasoning_tokens)}`, icon: ArrowUpRight },
         { title: "请求数", value: totals.requests, hint: `${number(totals.errors)} 次失败 · ${number(totals.in_flight_requests)} 次进行中`, icon: Activity },
       ].map(card => <div className="stat-card" key={card.title}><div className="stat-heading"><span>{card.title}</span><card.icon size={18} /></div><div className="stat-value">{number(card.value)}</div><div className="stat-label">{card.hint}</div></div>)}</div>
+      {(totals.pending_sync_requests || 0) > 0 && <div className="usage-warning" role="status"><strong>{number(totals.pending_sync_requests || 0)} 条源实例请求待补齐</strong><span>这些请求在备份快照时尚未完成，不是当前实例正在处理的请求。旧实例收尾后再次导出，在备份页面选择「仅补齐用量和路由」。已观察到的 Token 保留，未知部分不会估算或重复累计。</span></div>}
       {totals.missing_usage_requests > 0 && <div className="usage-warning" role="status"><strong>{number(totals.missing_usage_requests)} 次请求未返回用量</strong><span>可能是上游未提供、请求失败、流中断或后台任务尚未完成。下方 Token 仅汇总实际返回值，不将未知用量当作零。</span></div>}
       <div className="usage-visuals">
         <ModelUsage rows={modelRows} selected={model} onSelect={setModel} />

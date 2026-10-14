@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,6 +45,7 @@ type Totals struct {
 	KnownUsageRequests   int64 `json:"known_usage_requests"`
 	MissingUsageRequests int64 `json:"missing_usage_requests"`
 	InFlightRequests     int64 `json:"in_flight_requests"`
+	PendingSyncRequests  int64 `json:"pending_sync_requests"`
 }
 
 type Group struct {
@@ -118,8 +120,10 @@ func ParseFilter(values url.Values, now time.Time) (Filter, error) {
 }
 
 type Store struct {
-	db      *sql.DB
-	healthy atomic.Bool
+	reader      *sql.DB
+	coordinator *sync.RWMutex
+	db          *sql.DB
+	healthy     atomic.Bool
 }
 
 func Open(dir string) (*Store, error) {
@@ -143,7 +147,7 @@ func Open(dir string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	s := &Store{db: db}
+	s := &Store{db: db, coordinator: &sync.RWMutex{}}
 	for _, stmt := range []string{
 		"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA foreign_keys=ON",
 	} {
@@ -153,13 +157,29 @@ func Open(dir string) (*Store, error) {
 		}
 	}
 	var version int
-	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version > 2 {
+	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version > 3 {
 		db.Close()
 		return nil, errors.New("unsupported usage database version")
 	}
 	if err = s.initialize(version); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("initialize usage schema: %w", err)
+	}
+	// Independent WAL readers do not monopolize the single writer connection.
+	uri := &url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	q := url.Values{"mode": {"ro"}, "_pragma": {"query_only(1)", "busy_timeout(5000)"}}
+	uri.RawQuery = q.Encode()
+	s.reader, err = sql.Open("sqlite", uri.String())
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	s.reader.SetMaxOpenConns(4)
+	s.reader.SetMaxIdleConns(4)
+	if err = s.reader.Ping(); err != nil {
+		s.reader.Close()
+		db.Close()
+		return nil, err
 	}
 	s.healthy.Store(true)
 	return s, nil
@@ -202,20 +222,34 @@ func (s *Store) initialize(version int) error {
 			return err
 		}
 	}
+	if version < 3 {
+		if _, err = tx.Exec("ALTER TABLE requests ADD COLUMN pending_sync INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+	}
 	if _, err = tx.Exec(`
-		CREATE INDEX IF NOT EXISTS requests_upstream_date ON requests(upstream_id, started_at);
-		PRAGMA user_version=2;
-		UPDATE requests SET status=499, completed=1 WHERE completed=0;
+  CREATE INDEX IF NOT EXISTS requests_upstream_date ON requests(upstream_id, started_at);
+		PRAGMA user_version=3;
+		UPDATE requests SET status=499, completed=1 WHERE completed=0 AND pending_sync=0;
 	`); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (s *Store) Close() error  { return s.db.Close() }
-func (s *Store) Healthy() bool { return s.healthy.Load() }
+func (s *Store) Close() error { return errors.Join(s.reader.Close(), s.db.Close()) }
+
+// SetCoordinator is only called before the gateway starts accepting requests.
+func (s *Store) SetCoordinator(gate *sync.RWMutex) { s.coordinator = gate }
+func (s *Store) Healthy() bool                     { return s.healthy.Load() }
 
 func (s *Store) exec(query string, args ...any) error {
+	s.coordinator.RLock()
+	defer s.coordinator.RUnlock()
+	return s.execLocked(query, args...)
+}
+
+func (s *Store) execLocked(query string, args ...any) error {
 	// This context outlives a disconnected client so its final usage is saved,
 	// but disk/lock failures cannot stall proxy handlers indefinitely.
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -239,7 +273,7 @@ func (s *Store) Attempt(r Request) error {
 }
 
 func (s *Store) Finish(r Request) error {
-	return s.exec(`UPDATE requests SET model=?,status=?,attempts=?,duration_ms=?,completed=1 WHERE id=?`,
+	return s.exec(`UPDATE requests SET model=?,status=?,attempts=?,duration_ms=?,completed=1,pending_sync=0 WHERE id=?`,
 		r.Model, r.Status, r.Attempts, r.DurationMS, r.ID)
 }
 
@@ -265,11 +299,11 @@ const aggregate = `COUNT(*), COALESCE(SUM(status>=400),0),
 	COALESCE(SUM(input_tokens+output_tokens),0), COALESCE(SUM(cached_tokens),0),
 	COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(usage_known),0),
 	COALESCE(SUM(completed=1 AND attempts>0 AND usage_known=0),0),
-	COALESCE(SUM(completed=0),0)`
+	COALESCE(SUM(completed=0 AND pending_sync=0),0), COALESCE(SUM(pending_sync=1),0)`
 
 func destinations(t *Totals) []any {
 	return []any{&t.Requests, &t.Errors, &t.InputTokens, &t.OutputTokens, &t.TotalTokens,
-		&t.CachedTokens, &t.ReasoningTokens, &t.KnownUsageRequests, &t.MissingUsageRequests, &t.InFlightRequests}
+		&t.CachedTokens, &t.ReasoningTokens, &t.KnownUsageRequests, &t.MissingUsageRequests, &t.InFlightRequests, &t.PendingSyncRequests}
 }
 
 func (s *Store) Report(ctx context.Context, f Filter) (Report, error) {
@@ -285,7 +319,7 @@ func (s *Store) Report(ctx context.Context, f Filter) (Report, error) {
 		}
 	}
 	clause := " FROM requests WHERE " + strings.Join(where, " AND ")
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	tx, err := s.reader.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return out, err
 	}
@@ -343,4 +377,16 @@ func (s *Store) Report(ctx context.Context, f Filter) (Report, error) {
 		return out, err
 	}
 	return out, tx.Commit()
+}
+
+// BindWith makes the usage link and Responses route one snapshot boundary.
+func (s *Store) BindWith(scope, requestID string, bindRoute func() error) error {
+	s.coordinator.RLock()
+	defer s.coordinator.RUnlock()
+	if requestID != "" {
+		if err := s.execLocked("INSERT INTO response_links(scope,request_id) VALUES(?,?) ON CONFLICT(scope) DO NOTHING", scope, requestID); err != nil {
+			return err
+		}
+	}
+	return bindRoute()
 }

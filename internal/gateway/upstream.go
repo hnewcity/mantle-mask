@@ -143,12 +143,12 @@ func (g *Gateway) discover(ctx context.Context, u config.Upstream, project strin
 	start := time.Now()
 	resp, err := g.upstreamRequest(ctx, u, http.MethodGet, "/models", "", nil, http.Header{}, project)
 	if err != nil {
-		g.runtime.mark(u.ID, 502, time.Since(start), 0, "连接或鉴权失败")
+		g.runtime.mark(u, 502, time.Since(start), 0, "连接或鉴权失败")
 		return nil, errors.New("upstream connection or authentication failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		g.runtime.mark(u.ID, resp.StatusCode, time.Since(start), 0, fmt.Sprintf("模型列表返回 HTTP %d", resp.StatusCode))
+		g.runtime.mark(u, resp.StatusCode, time.Since(start), 0, fmt.Sprintf("模型列表返回 HTTP %d", resp.StatusCode))
 		return nil, fmt.Errorf("model discovery returned HTTP %d", resp.StatusCode)
 	}
 	data, err := boundedRead(resp.Body, 4<<20)
@@ -167,7 +167,7 @@ func (g *Gateway) discover(ctx context.Context, u config.Upstream, project strin
 			list.Data[i].OwnedBy = "bedrock"
 		}
 	}
-	g.runtime.mark(u.ID, 200, time.Since(start), 0, "")
+	g.runtime.mark(u, 200, time.Since(start), 0, "")
 	g.runtime.mu.Lock()
 	if len(g.runtime.modelCache) > 300 {
 		g.runtime.modelCache = map[string]cachedModels{}

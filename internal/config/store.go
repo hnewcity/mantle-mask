@@ -98,10 +98,11 @@ type State struct {
 }
 
 type Store struct {
-	mu    sync.RWMutex
-	path  string
-	aead  cipher.AEAD
-	state State
+	checkpoint sync.RWMutex
+	mu         sync.RWMutex
+	path       string
+	aead       cipher.AEAD
+	state      State
 }
 
 func Open(dir, masterKey string) (*Store, error) {
@@ -242,13 +243,22 @@ func AdminToken(dir, env string) (string, error) {
 func (s *Store) Snapshot() State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	b, _ := json.Marshal(s.state)
+	return cloneState(s.state)
+}
+
+func cloneState(state State) State {
+	b, _ := json.Marshal(state)
 	var clone State
 	_ = json.Unmarshal(b, &clone)
 	return clone
 }
 
+// Coordinator protects short persistence events, never an entire HTTP/SSE request.
+func (s *Store) Coordinator() *sync.RWMutex { return &s.checkpoint }
+
 func (s *Store) transaction(fn func(*State) error) error {
+	s.checkpoint.RLock()
+	defer s.checkpoint.RUnlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, _ := json.Marshal(s.state)
@@ -554,10 +564,25 @@ func (s *Store) DeleteKey(id string) error {
 func (s *Store) Authenticate(token string) (APIKey, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return authenticateState(s.state, token)
+}
+
+// AuthenticateSnapshot binds a request to the configuration that authorized it.
+func (s *Store) AuthenticateSnapshot(token string) (APIKey, State, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key, ok := authenticateState(s.state, token)
+	if !ok {
+		return APIKey{}, State{}, false
+	}
+	return key, cloneState(s.state), true
+}
+
+func authenticateState(state State, token string) (APIKey, bool) {
 	hash := Hash(token)
-	for _, key := range s.state.APIKeys {
+	for _, key := range state.APIKeys {
 		if key.RevokedAt == nil && subtle.ConstantTimeCompare([]byte(hash), []byte(key.Hash)) == 1 &&
-			slices.ContainsFunc(s.state.Users, func(u User) bool { return u.ID == key.UserID && u.Enabled }) {
+			slices.ContainsFunc(state.Users, func(u User) bool { return u.ID == key.UserID && u.Enabled }) {
 			key.Hash = ""
 			return key, true
 		}

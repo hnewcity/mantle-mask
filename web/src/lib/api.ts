@@ -10,7 +10,7 @@ export type User = { id: string; name: string; note: string; enabled: boolean; c
 export type SessionInfo = { role: "admin" | "user"; user?: User; key?: APIKey }
 export type UsageTotals = {
   requests: number; errors: number; input_tokens: number; output_tokens: number; total_tokens: number;
-  cached_tokens: number; reasoning_tokens: number; known_usage_requests: number; missing_usage_requests: number; in_flight_requests: number;
+  cached_tokens: number; reasoning_tokens: number; known_usage_requests: number; missing_usage_requests: number; in_flight_requests: number; pending_sync_requests?: number;
 }
 export type UsageGroup = UsageTotals & { id: string; name: string; user_id?: string }
 export type DailyModelUsage = UsageTotals & { date: string; model: string }
@@ -66,7 +66,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 export function message(error: unknown) { return error instanceof Error ? error.message : "操作失败，请重试" }
 
-export type RestoreResult = { restored: boolean; users: number; api_keys: number; upstreams: number; usage_requests: number }
+export type RestoreResult = { restored: boolean; usage_only: boolean; snapshot_at: string; users: number; api_keys: number; upstreams: number; usage_requests: number }
 
 async function backupRequest(path: string, options: RequestInit): Promise<Response> {
   const response = await fetch(`/api/admin/backup/${path}`, {
@@ -94,11 +94,12 @@ export async function exportBackup(password: string): Promise<void> {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-export async function restoreBackup(file: File, password: string): Promise<RestoreResult> {
+export async function restoreBackup(file: File, password: string, usageOnly = false): Promise<RestoreResult> {
   const body = new FormData()
   body.set("file", file)
   body.set("password", password)
   body.set("confirm", "RESTORE")
+  body.set("mode", usageOnly ? "usage" : "full")
   const response = await backupRequest("restore", { method: "POST", body })
   return response.json()
 }

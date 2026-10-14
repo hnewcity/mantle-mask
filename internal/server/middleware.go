@@ -12,6 +12,7 @@ import (
 )
 
 const apiKeyContext = "mantle.apiKey"
+const gatewayStateContext = "mantle.gatewayState"
 
 func bearer(r *http.Request) string {
 	parts := strings.Fields(r.Header.Get("Authorization"))
@@ -117,11 +118,23 @@ func (s *Server) authenticateKey(c *gin.Context, message string) {
 }
 
 func (s *Server) requireUser(c *gin.Context) {
+	// Keep user-scoped reads on the same configuration generation as authentication.
+	s.store.Coordinator().RLock()
+	defer s.store.Coordinator().RUnlock()
 	s.authenticateKey(c, "A valid user API key is required.")
+	if !c.IsAborted() {
+		c.Next()
+	}
 }
 
 func (s *Server) requireGatewayKey(c *gin.Context) {
-	s.authenticateKey(c, "A valid gateway API key is required.")
+	key, st, ok := s.store.AuthenticateSnapshot(bearer(c.Request))
+	if !ok {
+		abortError(c, http.StatusUnauthorized, "invalid_api_key", "A valid gateway API key is required.")
+		return
+	}
+	c.Set(apiKeyContext, key)
+	c.Set(gatewayStateContext, st)
 }
 
 func currentKey(c *gin.Context) config.APIKey {
