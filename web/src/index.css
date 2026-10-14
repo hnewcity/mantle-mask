@@ -845,3 +845,18 @@ td small { display: block; font-size: 10px; line-height: 1.6; margin-top: 5px; c
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* Password-protected full-instance migration, separate from the settings form. */
+.backup-settings { margin-top: 24px; }
+.backup-notes { display: grid; gap: 10px; color: var(--muted); font-size: 13px; line-height: 1.8; }
+.backup-notes strong { color: var(--foreground); }
+.backup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; margin-top: 24px; }
+.backup-block { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.backup-block h3 { font-size: 15px; font-weight: 600; }
+.backup-block > button { align-self: flex-start; margin-top: auto; }
+.backup-block input[type="file"] { height: auto; min-height: 40px; padding: 8px; }
+.backup-warning { color: var(--muted); font-size: 12px; line-height: 1.8; }
+.backup-result { margin-top: 18px; font-size: 13px; line-height: 1.8; }
+@media (max-width: 680px) { .backup-grid { grid-template-columns: 1fr; } }
+
+.settings-fields { display: contents; }

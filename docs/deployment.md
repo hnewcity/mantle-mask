@@ -43,7 +43,8 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 ## 数据、凭据与备份
 
 - Compose 使用 named volume `mantle-data`，Docker 会为名称加当前 Compose 项目前缀。不要在需要保留数据时执行 `docker compose down -v`。
-- 备份前先停止网关，完整备份数据卷，再启动；不要只复制运行中的 `usage.db`，它可能有 WAL/SHM 配套文件。
+- 推荐从「网关设置 → 备份与迁移」导出密码加密的 `.mmbak` 文件，在目标实例恢复，保留全部 API Key、上游凭据与用量。操作前暂停客户端流量并等待流式请求结束；恢复会覆盖而非合并，目标管理员令牌及主密钥保持不变。具体范围、限制和步骤见 [使用指南](guide.md#完整备份与迁移)。
+- 若使用文件级备份，先停止网关，完整备份数据卷，再启动；不要只复制运行中的 `usage.db`，它可能有 WAL/SHM 配套文件。
 - 外部配置 `MANTLE_MASTER_KEY` 时须另外保管该密钥；只备份数据库不足以恢复上游凭据。
 - 换用 bind mount 时保证宿主机目录对 UID 65532 可写，不要用 root 运行网关来绕过权限配置。
 - `.env` 的 `MANTLE_ADDR` / `MANTLE_DATA_DIR` 用于原生程序参考；Compose 明确固定容器地址 `0.0.0.0:8080` 和数据目录 `/app/data`。

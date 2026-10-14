@@ -33,3 +33,6 @@ web/*
 **/.env.*
 **/*.pem
 **/*.key
+
+**/*.mmbak
+**/restore-pending.json

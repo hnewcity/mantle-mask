@@ -65,3 +65,40 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json()
 }
 export function message(error: unknown) { return error instanceof Error ? error.message : "操作失败，请重试" }
+
+export type RestoreResult = { restored: boolean; users: number; api_keys: number; upstreams: number; usage_requests: number }
+
+async function backupRequest(path: string, options: RequestInit): Promise<Response> {
+  const response = await fetch(`/api/admin/backup/${path}`, {
+    ...options,
+    headers: { Authorization: `Bearer ${session.get()}`, ...options.headers },
+  })
+  if (!response.ok) {
+    if (response.status === 401) window.dispatchEvent(new Event("mantle:unauthorized"))
+    throw new Error(await errorMessage(response))
+  }
+  return response
+}
+
+export async function exportBackup(password: string): Promise<void> {
+  const response = await backupRequest("export", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }),
+  })
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement("a")
+  link.href = url
+  link.download = `mantle-mask-${new Date().toISOString().replace(/[:.]/g, "-")}.mmbak`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+export async function restoreBackup(file: File, password: string): Promise<RestoreResult> {
+  const body = new FormData()
+  body.set("file", file)
+  body.set("password", password)
+  body.set("confirm", "RESTORE")
+  const response = await backupRequest("restore", { method: "POST", body })
+  return response.json()
+}

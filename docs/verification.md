@@ -1,5 +1,15 @@
 # 验证记录
 
+## 2026-10-14 · 完整备份与恢复
+
+- `go test -race ./...`、`go vet ./...`：通过。
+- `npm --prefix web test`：5 个文件、20 个用例通过；`npm --prefix web run typecheck` 通过。
+- `npm --prefix web run build` 与 `go build -o bin/mantle-mask ./cmd/mantle-mask`：通过；Vite 仍提示主包超过 500 kB，非构建错误。
+- `npm --prefix web run test:e2e`：14 个浏览器 / SDK 用例全部通过，包括新增备份流程。
+- 新增覆盖：跨本地主密钥和外部主密钥迁移；保留原 Key、用户停用/Key 吊销状态、API Key 与 SigV4 上游凭据、设置、历史用量和 Responses 绑定；恢复及再次重启后原 Key 仍可用。
+- 失败路径覆盖：未授权请求、短密码、错密码、损坏/截断文件、不支持版本、不完整或重复数据、缺少覆盖确认均不修改原数据；活动流式请求和并发备份返回冲突；SQLite 失败回滚；跨文件恢复失败后拒绝流量，重启自动续做。
+- 已检查桌面和 390px 手机截图，备份区域无横向溢出；用隔离临时目录与模拟上游验证，没有迁移运行中的用户数据。
+
 ## 2026-10-12 · 开源发布验证
 
 - `bash scripts/build.sh`：前端生产构建与 Go 二进制构建通过。

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/hnewcity/mantle-mask/internal/config"
@@ -14,13 +15,15 @@ import (
 )
 
 type Server struct {
-	store     *config.Store
-	gateway   *gateway.Gateway
-	adminHash string
-	cors      map[string]bool
-	files     http.Handler
-	assets    fs.FS
-	router    *gin.Engine
+	migrationMu sync.RWMutex
+	backupMu    sync.Mutex
+	store       *config.Store
+	gateway     *gateway.Gateway
+	adminHash   string
+	cors        map[string]bool
+	files       http.Handler
+	assets      fs.FS
+	router      *gin.Engine
 }
 
 func New(store *config.Store, proxy *gateway.Gateway, adminToken, origins string) *Server {
@@ -42,6 +45,23 @@ func New(store *config.Store, proxy *gateway.Gateway, adminToken, origins string
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Backup endpoints serialize separately and acquire the exclusive lock only
+	// for snapshot/apply. Normal traffic never queues behind a long restore.
+	backupRoute := r.Method == http.MethodPost && (r.URL.Path == "/api/admin/backup/export" || r.URL.Path == "/api/admin/backup/restore")
+	if !backupRoute {
+		if !s.migrationMu.TryRLock() {
+			w.Header().Set("Retry-After", "5")
+			w.Header().Set("Cache-Control", "no-store")
+			gateway.Error(w, http.StatusServiceUnavailable, "migration_in_progress", "正在备份或恢复，请稍后重试。")
+			return
+		}
+		defer s.migrationMu.RUnlock()
+	}
+	if s.gateway.RestorePending() {
+		w.Header().Set("Cache-Control", "no-store")
+		gateway.Error(w, http.StatusServiceUnavailable, "restore_pending", "恢复尚未完成，请检查磁盘空间与权限并重启服务以完成恢复。")
+		return
+	}
 	s.router.ServeHTTP(w, r)
 }
 
@@ -73,6 +93,8 @@ func (s *Server) routes() {
 	admin.DELETE("/keys/:id", s.deleteKey)
 	admin.GET("/settings", func(c *gin.Context) { c.JSON(http.StatusOK, s.store.Snapshot().Settings) })
 	admin.PUT("/settings", s.saveSettings)
+	admin.POST("/backup/export", s.exportBackup)
+	admin.POST("/backup/restore", s.restoreBackup)
 	admin.GET("/playground/*path", s.playground)
 	admin.POST("/playground/*path", s.playground)
 

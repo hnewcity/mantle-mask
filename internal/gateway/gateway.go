@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -28,13 +29,14 @@ type Principal struct {
 }
 
 type Gateway struct {
-	store        *config.Store
-	client       *http.Client
-	runtime      *runtimeState
-	affinity     *affinityStore
-	usage        *usage.Store
-	credentialMu sync.Mutex
-	providers    map[string]aws.CredentialsProvider
+	restorePending atomic.Bool
+	store          *config.Store
+	client         *http.Client
+	runtime        *runtimeState
+	affinity       *affinityStore
+	usage          *usage.Store
+	credentialMu   sync.Mutex
+	providers      map[string]aws.CredentialsProvider
 }
 
 func New(store *config.Store, dir string) (*Gateway, error) {
@@ -53,14 +55,19 @@ func New(store *config.Store, dir string) (*Gateway, error) {
 		IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second, DisableCompression: true,
 	}
-	return &Gateway{
+	g := &Gateway{
 		store: store, affinity: affinity, usage: accounting, runtime: newRuntime(), providers: map[string]aws.CredentialsProvider{},
 		client: &http.Client{
 			Transport: transport,
 			// A redirect must not receive credentials for a configured upstream.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-	}, nil
+	}
+	if err := g.recoverRestore(); err != nil {
+		_ = g.Close()
+		return nil, fmt.Errorf("recover pending backup restore: %w", err)
+	}
+	return g, nil
 }
 
 func JSON(w http.ResponseWriter, status int, value any) {
@@ -120,6 +127,10 @@ func (g *Gateway) TestUpstream(ctx context.Context, id string) ([]Model, error) 
 }
 
 func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
+	// Keep discovery workers inside the request lifetime, including cancellation,
+	// so a subsequent migration cannot race late cache/credential writes.
+	var workers sync.WaitGroup
+	defer workers.Wait()
 	type result struct {
 		models []Model
 		err    error
@@ -141,7 +152,9 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 			results <- result{models: mapped}
 			continue
 		}
+		workers.Add(1)
 		go func(u config.Upstream) {
+			defer workers.Done()
 			select {
 			case limit <- struct{}{}:
 				defer func() { <-limit }()

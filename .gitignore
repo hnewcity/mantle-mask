@@ -18,3 +18,7 @@
 .DS_Store
 Thumbs.db
 admin-token.txt
+
+# Encrypted migration archives still contain sensitive instance data.
+*.mmbak
+restore-pending.json
