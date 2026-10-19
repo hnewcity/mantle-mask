@@ -109,12 +109,12 @@ func validRoute(method, path string) bool {
 
 func (g *Gateway) Close() error { g.client.CloseIdleConnections(); return g.usage.Close() }
 func (g *Gateway) Usage(ctx context.Context, f usage.Filter) (usage.Report, error) {
-	return g.usage.ReportWithPricing(ctx, f, g.store.Snapshot())
+	return g.usage.ReportWithPricing(ctx, f, g.store.PricingSnapshot())
 }
 func (g *Gateway) Metrics() Metrics {
 	m := g.runtime.metrics()
 	health := map[string]Health{}
-	for _, u := range g.store.Snapshot().Upstreams {
+	for _, u := range g.store.RoutingSnapshot().Upstreams {
 		if h, ok := m.Health[healthKey(u)]; ok {
 			health[u.ID] = h
 		}
@@ -126,7 +126,7 @@ func (g *Gateway) Metrics() Metrics {
 func (g *Gateway) Logs() []RequestLog { return g.runtime.requestLogs() }
 
 func (g *Gateway) TestUpstream(ctx context.Context, id string) ([]Model, error) {
-	for _, u := range g.store.Snapshot().Upstreams {
+	for _, u := range g.store.RoutingSnapshot().Upstreams {
 		if u.ID == id {
 			return g.discover(ctx, u, u.Project, false)
 		}
@@ -208,7 +208,7 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request, st config.State
 }
 
 func (g *Gateway) Proxy(w http.ResponseWriter, r *http.Request, principal Principal) {
-	g.ProxyWithState(w, r, principal, g.store.Snapshot())
+	g.ProxyWithState(w, r, principal, g.store.RoutingSnapshot())
 }
 
 func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, principal Principal, st config.State) {

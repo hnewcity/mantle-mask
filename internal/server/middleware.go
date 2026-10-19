@@ -128,7 +128,7 @@ func (s *Server) requireUser(c *gin.Context) {
 }
 
 func (s *Server) requireGatewayKey(c *gin.Context) {
-	key, st, ok := s.store.AuthenticateSnapshot(bearer(c.Request))
+	key, st, ok := s.store.AuthenticateRoutingSnapshot(bearer(c.Request))
 	if !ok {
 		abortError(c, http.StatusUnauthorized, "invalid_api_key", "A valid gateway API key is required.")
 		return

@@ -1,19 +1,22 @@
-import { useCallback, useEffect, useState } from "react"
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { ArrowRight, ArrowUpRight, CircleHelp, Loader2, LogOut, RefreshCw, ShieldCheck } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, getSession, message, session, type APIKey, type Metrics, type Settings, type Upstream, type User, type UsageReport, type SessionInfo } from "@/lib/api"
 import { Brand, Spinner, Toast } from "@/components/common"
 import { LiquidBackdrop } from "@/components/liquid-backdrop"
+import { startPolling } from "@/lib/polling"
 import { Overview } from "@/pages/Overview"
 import { Upstreams } from "@/pages/Upstreams"
 import { Keys } from "@/pages/Keys"
 import { Users } from "@/pages/Users"
-import { Usage } from "@/pages/Usage"
-import { UserPortal } from "@/pages/UserPortal"
-import { Playground } from "@/pages/Playground"
 import { Logs } from "@/pages/Logs"
-import { SettingsPage } from "@/pages/Settings"
+
+// Keep Markdown, date-picker and migration tooling off the login/overview path.
+const Usage = lazy(() => import("@/pages/Usage").then(module => ({ default: module.Usage })))
+const UserPortal = lazy(() => import("@/pages/UserPortal").then(module => ({ default: module.UserPortal })))
+const Playground = lazy(() => import("@/pages/Playground").then(module => ({ default: module.Playground })))
+const SettingsPage = lazy(() => import("@/pages/Settings").then(module => ({ default: module.SettingsPage })))
 
 const pages = [
   { id: "overview", name: "总览", en: "Overview" },
@@ -25,7 +28,7 @@ const pages = [
   { id: "logs", name: "请求日志", en: "Request logs" },
   { id: "settings", name: "网关设置", en: "Settings" },
 ]
-type Data = { upstreams: Upstream[]; keys: APIKey[]; allKeys: APIKey[]; metrics: Metrics; settings: Settings; users: User[]; usage: UsageReport | null }
+type Data = { upstreams: Upstream[]; keys: APIKey[]; allKeys: APIKey[]; metrics: Metrics; settings: Settings; users: User[]; usage: UsageReport | null; usageFailed: boolean }
 
 function Login({ onLogin }: { onLogin: (identity: SessionInfo) => void }) {
   const [userMode, setUserMode] = useState(false)
@@ -54,23 +57,31 @@ export default function App() {
     else setChecking(false)
     return () => { window.removeEventListener("hashchange", handleHash); window.removeEventListener("mantle:unauthorized", logout) }
   }, [logout])
-  const reload = useCallback(async () => {
-    try {
-      const [upstreams, keys, metrics, settings, users, usage] = await Promise.all([
-        api<{ data: Upstream[] }>("/upstreams"), api<{ data: APIKey[] }>("/keys?include_revoked=true"), api<Metrics>("/overview"), api<Settings>("/settings"), api<{ data: User[] }>("/users"), api<UsageReport>("/usage?all=true").catch(() => null),
-      ])
-      setData({ upstreams: upstreams.data, keys: keys.data.filter(k => !k.revoked_at), allKeys: keys.data, metrics, settings, users: users.data, usage }); setError("")
-    } catch (e) { setError(message(e)) }
-  }, [])
+  const poller = useRef<ReturnType<typeof startPolling> | null>(null)
+  const needsUsage = page.split("?")[0] === "users"
+  const reload = useCallback(async () => { await poller.current?.refresh() }, [])
   useEffect(() => {
     if (authenticated?.role !== "admin") return
-    void reload()
-    const interval = setInterval(() => void reload(), 15000)
-    return () => clearInterval(interval)
-  }, [authenticated, reload])
+    const polling = startPolling(async signal => {
+      try {
+        const options = { signal }
+        const [upstreams, keys, metrics, settings, users, usage] = await Promise.all([
+          api<{ data: Upstream[] }>("/upstreams", options), api<{ data: APIKey[] }>("/keys?include_revoked=true", options),
+          api<Metrics>("/overview", options), api<Settings>("/settings", options), api<{ data: User[] }>("/users", options),
+          needsUsage ? api<UsageReport>("/usage?all=true", options).catch(() => null) : Promise.resolve(null),
+        ])
+        if (!signal.aborted) {
+          setData({ upstreams: upstreams.data, keys: keys.data.filter(k => !k.revoked_at), allKeys: keys.data, metrics, settings, users: users.data, usage, usageFailed: needsUsage && !usage })
+          setError("")
+        }
+      } catch (e) { if (!signal.aborted) setError(message(e)) }
+    })
+    poller.current = polling
+    return () => { polling.stop(); poller.current = null }
+  }, [authenticated, needsUsage])
   if (checking) return <Spinner label="正在连接网关…" />
   if (!authenticated) return <><Login onLogin={setAuthenticated} /><Toast /></>
-  if (authenticated.role === "user") return <UserPortal identity={authenticated} logout={logout} />
+  if (authenticated.role === "user") return <Suspense fallback={<Spinner />}><UserPortal identity={authenticated} logout={logout} /></Suspense>
   const current = pages.find(p => p.id === page.split("?")[0]) || pages[0]
   const enabled = data?.upstreams.filter(u => u.enabled).length || 0
   return <div className="app-shell">
@@ -79,9 +90,9 @@ export default function App() {
       <div className="nav-wrap"><nav className="console-nav" aria-label="管理端导航">{pages.map((item, index) => <a key={item.id} href={`#/${item.id}`} aria-label={item.name} aria-current={current.id === item.id ? "page" : undefined} className={`nav-item ${current.id === item.id ? "active" : ""}`}><span className="nav-index" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span><span>{item.name}</span><span className="nav-english" aria-hidden="true">{item.en}</span></a>)}</nav><span className="nav-edition">SELF-HOSTED / V.02</span></div>
     </header>
     <div className="app-main">
-      <main className="content" id="main-content" tabIndex={-1}>{error && <div className="error-banner" role="alert">{error}<Button size="sm" variant="outline" onClick={() => void reload()}>重试</Button></div>}{!data ? <Spinner /> : <>
+      <main className="content" id="main-content" tabIndex={-1}>{error && <div className="error-banner" role="alert">{error}<Button size="sm" variant="outline" onClick={() => void reload()}>重试</Button></div>}{!data ? <Spinner /> : <Suspense fallback={<Spinner />}>
         {!data.metrics.usage_storage_healthy && <div className="error-banner" role="alert">用量存储发生错误，请检查磁盘空间和数据目录权限。存储无法写入时，新推理请求会被阻止。</div>}
-        {!data.usage && <div className="error-banner" role="alert">历史用量暂时无法读取，请检查服务日志后刷新。</div>}
+        {current.id === "users" && data.usageFailed && <div className="error-banner" role="alert">历史用量暂时无法读取，请检查服务日志后刷新。</div>}
         {current.id === "overview" && <Overview {...data} />}
         {current.id === "upstreams" && <Upstreams upstreams={data.upstreams} health={data.metrics.health} reload={reload} />}
         {current.id === "users" && <Users users={data.users} keys={data.allKeys} usage={data.usage} reload={reload} />}
@@ -90,6 +101,6 @@ export default function App() {
         {current.id === "playground" && <Playground upstreams={data.upstreams} onComplete={reload} />}
         {current.id === "logs" && <Logs />}
         {current.id === "settings" && <SettingsPage settings={data.settings} reload={reload} />}
-      </>}</main><footer className="footer"><span>MANTLE MASK · YOUR MODELS. YOUR INFRASTRUCTURE.</span><span><i className="footer-dot" />{enabled} 个上游已启用 <span>/</span> OpenAI compatible <span>/</span> v0.2.0</span></footer>
+      </Suspense>}</main><footer className="footer"><span>MANTLE MASK · YOUR MODELS. YOUR INFRASTRUCTURE.</span><span><i className="footer-dot" />{enabled} 个上游已启用 <span>/</span> OpenAI compatible <span>/</span> v0.2.0</span></footer>
     </div><Toast /></div>
 }

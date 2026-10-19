@@ -68,7 +68,7 @@ func (s *Server) routes() {
 	admin.PUT("/users/:id", s.saveUser)
 	admin.GET("/usage", func(c *gin.Context) { s.report(c, "") })
 	admin.GET("/usage/pricing", func(c *gin.Context) {
-		prices := s.store.Snapshot().ModelPrices
+		prices := s.store.PricingSnapshot().ModelPrices
 		if prices == nil {
 			prices = map[string]config.ModelPrice{}
 		}
@@ -76,7 +76,7 @@ func (s *Server) routes() {
 	})
 	admin.PUT("/usage/pricing", s.saveModelPrices)
 	admin.GET("/usage/pricing/reference", func(c *gin.Context) {
-		catalog := s.store.Snapshot().PriceCatalog
+		catalog := s.store.PricingSnapshot().PriceCatalog
 		if catalog == nil {
 			catalog = &config.PriceCatalog{Entries: []config.ReferencePrice{}, Sources: []config.PriceSourceStatus{}, Warnings: []string{}}
 		}
@@ -93,7 +93,7 @@ func (s *Server) routes() {
 	admin.GET("/keys", s.listKeys)
 	admin.POST("/keys", s.createKey)
 	admin.DELETE("/keys/:id", s.deleteKey)
-	admin.GET("/settings", func(c *gin.Context) { c.JSON(http.StatusOK, s.store.Snapshot().Settings) })
+	admin.GET("/settings", func(c *gin.Context) { c.JSON(http.StatusOK, s.store.Settings()) })
 	admin.PUT("/settings", s.saveSettings)
 	admin.POST("/backup/export", s.exportBackup)
 	admin.POST("/backup/restore", s.restoreBackup)

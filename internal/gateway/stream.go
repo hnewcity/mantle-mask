@@ -15,6 +15,7 @@ type observer struct {
 	event           []byte
 	onResponse      func(string) error
 	onUsage         func(usage.Counters) error
+	boundResponse   string // last successfully persisted response ID
 	input           int64
 	output          int64
 	cached          int64
@@ -54,11 +55,11 @@ func (o *observer) json(data []byte) error {
 	if item.Object == "chat.completion.chunk" {
 		o.sawChat = true
 		expected := max(1, o.expectedChoices)
-		if o.finishedChoices == nil {
-			o.finishedChoices = make(map[int]bool)
-		}
 		for _, choice := range item.Choices {
 			if choice.Index >= 0 && choice.Index < expected && choice.FinishReason != nil && *choice.FinishReason != "" {
+				if o.finishedChoices == nil {
+					o.finishedChoices = make(map[int]bool)
+				}
 				o.finishedChoices[choice.Index] = true
 			}
 		}
@@ -68,10 +69,11 @@ func (o *observer) json(data []byte) error {
 			o.complete = true
 		}
 	}
-	if item.Object == "response" && item.ID != "" && o.onResponse != nil {
+	if item.Object == "response" && item.ID != "" && item.ID != o.boundResponse && o.onResponse != nil {
 		if err := o.onResponse(item.ID); err != nil {
 			return err
 		}
+		o.boundResponse = item.ID
 	}
 	if counts, ok := item.Usage.counters(); ok {
 		counts.InputTokens = max(o.input, counts.InputTokens)
@@ -134,22 +136,34 @@ func (u *tokenUsage) counters() (usage.Counters, bool) {
 }
 
 func (o *observer) write(chunk []byte) error {
-	for _, b := range chunk {
-		if b != '\n' {
-			if len(o.line) >= 1<<20 {
+	for len(chunk) > 0 {
+		n := bytes.IndexByte(chunk, '\n')
+		if n < 0 {
+			if len(o.line)+len(chunk) > 1<<20 {
 				return errors.New("SSE event exceeds 1 MiB observation limit")
 			}
-			o.line = append(o.line, b)
-			continue
+			o.line = append(o.line, chunk...)
+			return nil
 		}
-		line := bytes.TrimSuffix(o.line, []byte{'\r'})
+		if len(o.line)+n > 1<<20 {
+			return errors.New("SSE event exceeds 1 MiB observation limit")
+		}
+		line := chunk[:n]
+		if len(o.line) > 0 {
+			o.line = append(o.line, line...)
+			line = o.line
+		}
+		chunk = chunk[n+1:]
+		line = bytes.TrimSuffix(line, []byte{'\r'})
 		if len(line) == 0 {
 			data := bytes.TrimSpace(o.event)
 			if bytes.Equal(data, []byte("[DONE]")) {
 				o.complete = true
 				o.sawDone = true
-			} else if err := o.json(data); err != nil {
-				return err
+			} else if len(data) > 0 {
+				if err := o.json(data); err != nil {
+					return err
+				}
 			}
 			o.event = o.event[:0]
 		} else if bytes.HasPrefix(line, []byte("data:")) {

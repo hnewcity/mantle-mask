@@ -67,6 +67,7 @@ type runtimeState struct {
 	mu         sync.Mutex
 	started    time.Time
 	logs       []RequestLog
+	logStart   int // index of the oldest retained entry
 	total      int64
 	errors     int64
 	tokens     int64
@@ -94,16 +95,36 @@ func (s *runtimeState) record(log RequestLog, capacity int) {
 	}
 	s.latency += log.DurationMS
 	s.tokens += log.InputTokens + log.OutputTokens
-	s.logs = append(s.logs, log)
-	if len(s.logs) > capacity {
-		s.logs = append([]RequestLog(nil), s.logs[len(s.logs)-capacity:]...)
+	capacity = max(0, capacity)
+	if cap(s.logs) != capacity {
+		// Settings can change while requests are in flight. Resize once per
+		// capacity change, retaining the newest entries in completion order.
+		keep := min(len(s.logs), capacity)
+		next := make([]RequestLog, keep, capacity)
+		for i := range keep {
+			next[i] = s.logs[(s.logStart+len(s.logs)-keep+i)%len(s.logs)]
+		}
+		s.logs, s.logStart = next, 0
+	}
+	if capacity == 0 {
+		return
+	}
+	if len(s.logs) < capacity {
+		s.logs = append(s.logs, log)
+	} else {
+		s.logs[s.logStart] = log
+		s.logStart = (s.logStart + 1) % capacity
 	}
 }
 
 func (s *runtimeState) metrics() Metrics {
+	return s.metricsAt(time.Now().UTC())
+}
+
+func (s *runtimeState) metricsAt(now time.Time) Metrics {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := Metrics{StartedAt: s.started, Requests: s.total, Errors: s.errors, Tokens: s.tokens, Recent: []RequestLog{}, Timeline: []bucket{}, Health: map[string]Health{}}
+	out := Metrics{StartedAt: s.started, Requests: s.total, Errors: s.errors, Tokens: s.tokens, Recent: make([]RequestLog, 0, min(8, len(s.logs))), Health: map[string]Health{}}
 	if s.total > 0 {
 		out.AvgLatencyMS = s.latency / s.total
 	}
@@ -111,20 +132,25 @@ func (s *runtimeState) metrics() Metrics {
 		out.Health[k] = v
 	}
 	for i := len(s.logs) - 1; i >= 0 && len(out.Recent) < 8; i-- {
-		out.Recent = append(out.Recent, s.logs[i])
+		out.Recent = append(out.Recent, s.logs[(s.logStart+i)%len(s.logs)])
 	}
-	start := time.Now().UTC().Truncate(time.Minute).Add(-29 * time.Minute)
-	for i := 0; i < 30; i++ {
-		b := bucket{Time: start.Add(time.Duration(i) * time.Minute)}
-		for _, log := range s.logs {
-			if !log.Time.Before(b.Time) && log.Time.Before(b.Time.Add(time.Minute)) {
-				b.Requests++
-				if log.Status >= 400 {
-					b.Errors++
-				}
-			}
+	start := now.UTC().Truncate(time.Minute).Add(-29 * time.Minute)
+	end := start.Add(30 * time.Minute)
+	out.Timeline = make([]bucket, 30)
+	for i := range out.Timeline {
+		out.Timeline[i].Time = start.Add(time.Duration(i) * time.Minute)
+	}
+	// Logs arrive in completion order, not start-time order: scan all retained
+	// entries once rather than scanning the entire buffer for each minute.
+	for _, log := range s.logs {
+		if log.Time.Before(start) || !log.Time.Before(end) {
+			continue
 		}
-		out.Timeline = append(out.Timeline, b)
+		b := &out.Timeline[int(log.Time.Sub(start)/time.Minute)]
+		b.Requests++
+		if log.Status >= 400 {
+			b.Errors++
+		}
 	}
 	return out
 }
@@ -133,8 +159,8 @@ func (s *runtimeState) requestLogs() []RequestLog {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]RequestLog, len(s.logs))
-	for i, l := range s.logs {
-		out[len(s.logs)-i-1] = l
+	for i := range s.logs {
+		out[len(s.logs)-i-1] = s.logs[(s.logStart+i)%len(s.logs)]
 	}
 	return out
 }

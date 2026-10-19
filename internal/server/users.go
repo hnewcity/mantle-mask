@@ -61,7 +61,7 @@ func (s *Server) report(c *gin.Context, userID string) {
 		report.ByUpstream = nil
 	} else {
 		names := make(map[string]string)
-		for _, u := range s.store.Snapshot().Upstreams {
+		for _, u := range s.store.RoutingSnapshot().Upstreams {
 			names[u.ID] = u.Name
 		}
 		for i := range report.ByUpstream {

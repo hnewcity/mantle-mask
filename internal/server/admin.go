@@ -8,7 +8,7 @@ import (
 )
 
 func (s *Server) listUsers(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"data": s.store.Snapshot().Users})
+	c.JSON(http.StatusOK, gin.H{"data": s.store.Users()})
 }
 
 func (s *Server) saveUser(c *gin.Context) {
@@ -126,7 +126,7 @@ func (s *Server) synchronizeModelPrices(c *gin.Context) {
 		return
 	}
 	defer s.pricingSyncMu.Unlock()
-	state := s.store.Snapshot()
+	state := s.store.PricingSnapshot()
 	regions := []string{}
 	for _, u := range state.Upstreams {
 		if region := config.PricingRegion(u); region != "" {

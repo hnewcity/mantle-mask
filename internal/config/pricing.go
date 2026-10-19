@@ -84,14 +84,7 @@ func (s *Store) UpdateModelPrices(prices map[string]ModelPrice) error {
 	if err := ValidateModelPrices(prices); err != nil {
 		return err
 	}
-	data, err := json.Marshal(prices)
-	if err != nil {
-		return err
-	}
-	var copied map[string]ModelPrice
-	if err := json.Unmarshal(data, &copied); err != nil {
-		return err
-	}
+	copied := clonePrices(prices)
 	return s.transaction(func(st *State) error { st.ModelPrices = copied; return nil })
 }
 
@@ -147,16 +140,8 @@ func (s *Store) UpdatePriceCatalog(c PriceCatalog) error {
 	if err := ValidatePriceCatalog(&c); err != nil {
 		return err
 	}
-	// Serialization also owns optional rate pointers and all catalog slices.
-	data, err := json.Marshal(c)
-	if err != nil {
-		return err
-	}
-	var copied PriceCatalog
-	if err := json.Unmarshal(data, &copied); err != nil {
-		return err
-	}
-	return s.transaction(func(st *State) error { st.PriceCatalog = &copied; return nil })
+	copied := cloneCatalog(&c)
+	return s.transaction(func(st *State) error { st.PriceCatalog = copied; return nil })
 }
 
 // NewPriceResolver resolves the exact configured alias on the recorded upstream.

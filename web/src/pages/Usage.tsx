@@ -11,6 +11,7 @@ import { SearchSelect } from "@/components/ui/search-select"
 import { Empty, PageTitle, Spinner } from "@/components/common"
 import { api, selfApi, message, type APIKey, type User, type Upstream, type UsageGroup, type UsageReport } from "@/lib/api"
 import { number } from "@/lib/utils"
+import { startPolling } from "@/lib/polling"
 import { localDate } from "@/lib/dates"
 
 function ModelUsage({ rows, selected, onSelect }: { rows: UsageGroup[]; selected: string; onSelect: (id: string) => void }) {
@@ -56,32 +57,29 @@ export function Usage({ users = [], keys, upstreams = [], personal = false }: { 
   const [report, setReport] = useState<UsageReport | null>(null), [error, setError] = useState(""), [busy, setBusy] = useState(false), [revision, setRevision] = useState(0)
   const baseQuery = new URLSearchParams({ timezone_offset: String(-new Date().getTimezoneOffset()), ...(all ? { all: "true" } : { from, to }), user_id: userID, key_id: keyID }).toString()
   useEffect(() => {
-    const timer = setInterval(() => setRevision(v => v + 1), 15000)
-    return () => clearInterval(timer)
-  }, [])
-  useEffect(() => {
-    const controller = new AbortController()
-    setBusy(true)
-    const request = personal ? selfApi : api
-    // Model choices and shares follow the selected upstream. Upstream choices
-    // remain available when filtering, including deleted upstreams with history.
-    const upstreamQuery = personal ? baseQuery : `${baseQuery}&upstream_id=${encodeURIComponent(upstreamID)}`
-    void Promise.all([
-      request<UsageReport>(`/usage?${upstreamQuery}&model=${encodeURIComponent(model)}`, { signal: controller.signal }),
-      model ? request<UsageReport>(`/usage?${upstreamQuery}`, { signal: controller.signal }) : Promise.resolve(null),
-      !personal && upstreamID ? request<UsageReport>(`/usage?${baseQuery}`, { signal: controller.signal }) : Promise.resolve(null),
-    ])
-      .then(([data, modelBaseline, upstreamBaseline]) => {
-        if (!controller.signal.aborted) {
-          setReport(data)
-          setModelRows((modelBaseline || data).by_model)
-          setUpstreamRows((upstreamBaseline || modelBaseline || data).by_upstream || [])
-          setError("")
-        }
-      })
-      .catch(e => { if (!controller.signal.aborted) { setError(message(e)); setReport(null); setModelRows([]); setUpstreamRows([]) } })
-      .finally(() => { if (!controller.signal.aborted) setBusy(false) })
-    return () => controller.abort()
+    const polling = startPolling(async signal => {
+      setBusy(true)
+      const request = personal ? selfApi : api
+      // Model choices and shares follow the selected upstream. Upstream choices
+      // remain available when filtering, including deleted upstreams with history.
+      const upstreamQuery = personal ? baseQuery : `${baseQuery}&upstream_id=${encodeURIComponent(upstreamID)}`
+      await Promise.all([
+        request<UsageReport>(`/usage?${upstreamQuery}&model=${encodeURIComponent(model)}`, { signal }),
+        model ? request<UsageReport>(`/usage?${upstreamQuery}`, { signal }) : Promise.resolve(null),
+        !personal && upstreamID ? request<UsageReport>(`/usage?${baseQuery}`, { signal }) : Promise.resolve(null),
+      ])
+        .then(([data, modelBaseline, upstreamBaseline]) => {
+          if (!signal.aborted) {
+            setReport(data)
+            setModelRows((modelBaseline || data).by_model)
+            setUpstreamRows((upstreamBaseline || modelBaseline || data).by_upstream || [])
+            setError("")
+          }
+        })
+        .catch(e => { if (!signal.aborted) { setError(message(e)); setReport(null); setModelRows([]); setUpstreamRows([]) } })
+        .finally(() => { if (!signal.aborted) setBusy(false) })
+    })
+    return () => polling.stop()
   }, [baseQuery, model, upstreamID, revision, personal])
   const upstreamLabels = new Map(upstreamRows.filter(row => row.id).map(row => [row.id, `${row.name || row.id}（已删除）`]))
   for (const upstream of upstreams) upstreamLabels.set(upstream.id, `${upstream.name}${upstream.enabled ? "" : "（已停用）"}`)

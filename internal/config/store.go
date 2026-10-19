@@ -254,13 +254,6 @@ func (s *Store) Snapshot() State {
 	return cloneState(s.state)
 }
 
-func cloneState(state State) State {
-	b, _ := json.Marshal(state)
-	var clone State
-	_ = json.Unmarshal(b, &clone)
-	return clone
-}
-
 // Coordinator protects short persistence events, never an entire HTTP/SSE request.
 func (s *Store) Coordinator() *sync.RWMutex { return &s.checkpoint }
 
@@ -269,9 +262,7 @@ func (s *Store) transaction(fn func(*State) error) error {
 	defer s.checkpoint.RUnlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	b, _ := json.Marshal(s.state)
-	var next State
-	_ = json.Unmarshal(b, &next)
+	next := cloneState(s.state)
 	if err := fn(&next); err != nil {
 		return err
 	}
@@ -284,7 +275,7 @@ func (s *Store) transaction(fn func(*State) error) error {
 
 func (s *Store) Views() []UpstreamView {
 	out := []UpstreamView{}
-	for _, u := range s.Snapshot().Upstreams {
+	for _, u := range s.RoutingSnapshot().Upstreams {
 		has := u.Secret != ""
 		u.Secret = ""
 		out = append(out, UpstreamView{Upstream: u, HasCredentials: has})
@@ -521,10 +512,13 @@ func (s *Store) User(id string) (User, bool) {
 }
 
 func (s *Store) Keys(userID string, includeRevoked bool) []APIKey {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	keys := []APIKey{}
-	for _, k := range s.Snapshot().APIKeys {
+	for _, k := range s.state.APIKeys {
 		if (userID == "" || k.UserID == userID) && (includeRevoked || k.RevokedAt == nil) {
 			k.Hash = ""
+			k.RevokedAt = clonePointer(k.RevokedAt)
 			keys = append(keys, k)
 		}
 	}

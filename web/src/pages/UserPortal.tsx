@@ -3,17 +3,19 @@ import { KeyRound, LogOut } from "lucide-react"
 import { Brand, CopyButton, Spinner, Toast } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import { selfApi, message, type APIKey, type SessionInfo } from "@/lib/api"
+import { startPolling } from "@/lib/polling"
 import { Usage } from "@/pages/Usage"
 
 export function UserPortal({ identity, logout }: { identity: SessionInfo; logout: () => void }) {
   const [keys, setKeys] = useState<APIKey[] | null>(null), [error, setError] = useState("")
   useEffect(() => {
-    let active = true
-    const load = () => selfApi<{ data: APIKey[] }>("/keys")
-      .then(result => { if (active) { setKeys(result.data); setError("") } })
-      .catch(e => { if (active) setError(message(e)) })
-    void load(); const timer = setInterval(() => void load(), 15000)
-    return () => { active = false; clearInterval(timer) }
+    const polling = startPolling(async signal => {
+      try {
+        const result = await selfApi<{ data: APIKey[] }>("/keys", { signal })
+        if (!signal.aborted) { setKeys(result.data); setError("") }
+      } catch (e) { if (!signal.aborted) setError(message(e)) }
+    })
+    return () => polling.stop()
   }, [])
   return <div className="portal-shell">
     <header className="portal-header"><Brand /><div><span className="portal-identity">{identity.user?.name}</span><Button variant="ghost" size="sm" onClick={logout}><LogOut size={15} />退出登录</Button></div></header>
