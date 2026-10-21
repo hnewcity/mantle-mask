@@ -26,7 +26,7 @@ func reportFilter(t *testing.T, raw string) Filter {
 
 func TestPersistenceReconciliationAndCalendarDates(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir)
+	s, err := openForTest(t, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestPersistenceReconciliationAndCalendarDates(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s, err = Open(dir)
+	s, err = openForTest(t, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestPersistenceReconciliationAndCalendarDates(t *testing.T) {
 }
 
 func TestConcurrentRequestsAndMissingVersusZeroUsage(t *testing.T) {
-	s, err := Open(t.TempDir())
+	s, err := openForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestConcurrentRequestsAndMissingVersusZeroUsage(t *testing.T) {
 }
 
 func TestUpstreamGroupingAndCombinedFilters(t *testing.T) {
-	s, err := Open(t.TempDir())
+	s, err := openForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,6 +207,9 @@ func TestUpstreamGroupingAndCombinedFilters(t *testing.T) {
 }
 
 func TestMigrateV1UsagePreservesHistoryAndResponseLinks(t *testing.T) {
+	if testMySQLDSN != "" {
+		t.Skip("SQLite schema migration; MySQL starts at the current schema")
+	}
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(dir, "usage.db"))
 	if err != nil {
@@ -235,7 +238,7 @@ func TestMigrateV1UsagePreservesHistoryAndResponseLinks(t *testing.T) {
 	}
 	// Opening twice covers the one-time migration and reopening an upgraded DB.
 	for range 2 {
-		s, err := Open(dir)
+		s, err := openForTest(t, dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -257,7 +260,7 @@ func TestMigrateV1UsagePreservesHistoryAndResponseLinks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s, err := Open(dir)
+	s, err := openForTest(t, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +278,7 @@ func TestMigrateV1UsagePreservesHistoryAndResponseLinks(t *testing.T) {
 }
 
 func TestDailyModelsUseCalendarAndAllFilters(t *testing.T) {
-	s, err := Open(t.TempDir())
+	s, err := openForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

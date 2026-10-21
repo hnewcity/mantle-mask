@@ -157,7 +157,7 @@ func (b Backup) Validate() error {
 	return nil
 }
 
-// Restore is a single SQLite transaction, not a copy of a potentially stale WAL file.
+// Restore is a single database transaction, not a copy of a potentially stale WAL file.
 func (s *Store) Restore(ctx context.Context, b Backup) error {
 	if err := b.Validate(); err != nil {
 		return err
@@ -167,8 +167,10 @@ func (s *Store) Restore(ctx context.Context, b Backup) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "DELETE FROM response_links; DELETE FROM requests;"); err != nil {
-		return err
+	for _, table := range []string{"response_links", "requests"} {
+		if _, err = tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			return err
+		}
 	}
 	stmt, err := tx.PrepareContext(ctx, "INSERT INTO requests ("+backupColumns+") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 	if err != nil {

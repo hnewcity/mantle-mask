@@ -45,6 +45,7 @@ UPDATE_SCREENSHOTS=1 npm run screenshots:readme
 - Go 使用 `gofmt`；TypeScript 使用严格类型、双引号、两空格缩进和无行尾分号。
 - 复用现有 UI 组件，保持中文文案和无障碍交互。
 - 修复鉴权、路由、持久化和 SSE 时添加对应测试。
+- 修改用量存储时，另用一次性 MySQL 8.0.19+ 运行 `MANTLE_TEST_MYSQL_DSN='user:pass@tcp(host:3306)/' go test -race ./internal/usage`。DSN 不带库名时，每个测试会新建并删除自己的 `mantle_mask_test_*` 库，请勿指向生产库。
 - 提交信息使用简短祈使句；PR 说明行为变化、关联 Issue、验证命令和结果。界面变更附截图。
 - 不提交 `.env`、运行数据、私钥、AWS 凭据、管理员令牌或业务对话。安全问题请阅读 [SECURITY.md](SECURITY.md)。
 

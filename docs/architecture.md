@@ -28,7 +28,7 @@ flowchart LR
 ```text
 cmd/mantle-mask/          进程入口、环境变量、优雅退出
 internal/config/         配置事务、版本迁移、AES-GCM、用户与客户端密钥
-internal/usage/          SQLite 请求记录、用量补记、分组聚合
+internal/usage/          SQLite / MySQL 请求记录、用量补记、分组聚合
 internal/gateway/        上游 HTTP 客户端、SigV4、路由、SSE、统计
 internal/server/         Gin 路由、管理与用户 API、鉴权中间件、CORS、静态前端
 web/src/components/ui/   shadcn/ui 官方组件源码

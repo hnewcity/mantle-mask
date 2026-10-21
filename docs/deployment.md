@@ -49,7 +49,8 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 - 换用 bind mount 时保证宿主机目录对 UID 65532 可写，不要用 root 运行网关来绕过权限配置。
 - `.env` 的 `MANTLE_ADDR` / `MANTLE_DATA_DIR` 用于原生程序参考；Compose 明确固定容器地址 `0.0.0.0:8080` 和数据目录 `/app/data`。
 - 使用 SigV4 默认凭据链时，在自己维护的 Compose override 中显式传入所需 AWS 变量或只读挂载共享配置。仓库默认 Compose 不隐式转发宿主机 AWS 凭据。
-- 公网服务前置 HTTPS 反向代理，关闭 SSE 缓冲并设置足够长的超时。不要让多个副本共享同一 SQLite 数据目录。
+- 公网服务前置 HTTPS 反向代理，关闭 SSE 缓冲并设置足够长的超时。不要让多个副本共享同一 SQLite 数据目录或同一 MySQL 库。
+- 用量改存 MySQL 时设置 `MANTLE_MYSQL_DSN`，从 SQLite 迁移时只在一次启动中设置 `MANTLE_MYSQL_IMPORT_SQLITE=true`，见 [使用指南](guide.md#使用-mysql-保存用量)。`data/` 卷仍需保留：配置、凭据与路由不在 MySQL 中；MySQL 数据请用其自身工具备份，或继续使用控制台的加密迁移备份。
 
 ## CI / GHCR / Release
 

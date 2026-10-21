@@ -17,7 +17,7 @@ func assertCost(t *testing.T, got Cost, amount float64, priced, unpriced int64) 
 }
 
 func TestCostEstimatesAcrossDimensionsAndFilters(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := openForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestCostEstimatesAcrossDimensionsAndFilters(t *testing.T) {
 }
 
 func TestCostPriceIDsAreParametersAndReconciliationDoesNotDoubleCount(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := openForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestCostPriceIDsAreParametersAndReconciliationDoesNotDoubleCount(t *testing
 }
 
 func TestReferencePricesUseUpstreamRegionAliasesPerRequestTiersAndManualOverrides(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := openForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

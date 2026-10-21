@@ -12,7 +12,7 @@ import (
 
 func TestBackupRoundTripAndTransactionalFailure(t *testing.T) {
 	ctx := context.Background()
-	source, err := Open(t.TempDir())
+	source, err := openForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestBackupRoundTripAndTransactionalFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := Open(t.TempDir())
+	target, err := openForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,12 @@ func TestBackupRoundTripAndTransactionalFailure(t *testing.T) {
 		t.Fatalf("usage changed: %v", err)
 	}
 	// A database error halfway through a restore must roll back deleted rows too.
-	if _, err := target.db.Exec(`CREATE TRIGGER reject_restore BEFORE INSERT ON requests WHEN NEW.id='reject' BEGIN SELECT RAISE(ABORT,'test failure'); END;`); err != nil {
+	trigger := `CREATE TRIGGER reject_restore BEFORE INSERT ON requests WHEN NEW.id='reject' BEGIN SELECT RAISE(ABORT,'test failure'); END;`
+	if target.sql.mysql {
+		trigger = `CREATE TRIGGER reject_restore BEFORE INSERT ON requests FOR EACH ROW
+			BEGIN IF NEW.id='reject' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='test failure'; END IF; END`
+	}
+	if _, err := target.db.Exec(trigger); err != nil {
 		t.Fatal(err)
 	}
 	broken := Backup{Requests: append([]BackupRequest{}, original.Requests...), Links: map[string]string{}}

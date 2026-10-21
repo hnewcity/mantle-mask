@@ -39,12 +39,12 @@ type Gateway struct {
 	providers      map[string]aws.CredentialsProvider
 }
 
-func New(store *config.Store, dir string) (*Gateway, error) {
+func New(store *config.Store, dir string, storage usage.Options) (*Gateway, error) {
 	affinity, err := openAffinity(dir)
 	if err != nil {
 		return nil, err
 	}
-	accounting, err := usage.Open(dir)
+	accounting, err := usage.OpenStore(dir, storage)
 	if err != nil {
 		return nil, err
 	}

@@ -1,5 +1,13 @@
 # 更新记录
 
+## 未发布
+
+### MySQL 用量存储
+
+- 新增可选环境变量 `MANTLE_MYSQL_DSN`：设置后用量库改用 MySQL 8.0.19+，未设置时仍使用 SQLite，行为不变。
+- 默认不迁移 SQLite 数据；设置 `MANTLE_MYSQL_IMPORT_SQLITE=true` 时，启动时在单个事务中用 `usage.db` 整体覆盖 MySQL 用量，迁移后需移除该变量。同一库只允许一个网关实例使用。
+- 报表、费用估算、在线备份、恢复与迁移合并在两种后端上语义一致；`MANTLE_TEST_MYSQL_DSN` 可让用量测试套件在 MySQL 上运行。
+
 ## 0.3.2 — 2026-10-19
 
 ### CPU、内存与控制台性能

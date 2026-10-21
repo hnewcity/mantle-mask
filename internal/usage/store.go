@@ -133,7 +133,21 @@ type Store struct {
 	reader      *sql.DB
 	coordinator *sync.RWMutex
 	db          *sql.DB
+	sql         dialect
+	lock        *mysqlLock
 	healthy     atomic.Bool
+}
+
+// dialect holds the statements whose upsert and scalar MAX syntax differ.
+type dialect struct {
+	mysql                        bool
+	bindLink, tokenUpdate, merge string
+}
+
+var sqliteDialect = dialect{
+	bindLink:    "INSERT INTO response_links(scope,request_id) VALUES(?,?) ON CONFLICT(scope) DO NOTHING",
+	tokenUpdate: tokenUpdate,
+	merge:       mergeRequest,
 }
 
 func Open(dir string) (*Store, error) {
@@ -157,7 +171,7 @@ func Open(dir string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	s := &Store{db: db, coordinator: &sync.RWMutex{}}
+	s := &Store{db: db, coordinator: &sync.RWMutex{}, sql: sqliteDialect}
 	for _, stmt := range []string{
 		"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA foreign_keys=ON",
 	} {
@@ -247,7 +261,13 @@ func (s *Store) initialize(version int) error {
 	return tx.Commit()
 }
 
-func (s *Store) Close() error { return errors.Join(s.reader.Close(), s.db.Close()) }
+func (s *Store) Close() error {
+	var err error
+	if s.lock != nil {
+		err = s.lock.release()
+	}
+	return errors.Join(err, s.reader.Close(), s.db.Close())
+}
 
 // SetCoordinator is only called before the gateway starts accepting requests.
 func (s *Store) SetCoordinator(gate *sync.RWMutex) { s.coordinator = gate }
@@ -288,7 +308,7 @@ func (s *Store) Finish(r Request) error {
 }
 
 func (s *Store) Bind(scope, requestID string) error {
-	return s.exec("INSERT INTO response_links(scope,request_id) VALUES(?,?) ON CONFLICT(scope) DO NOTHING", scope, requestID)
+	return s.exec(s.sql.bindLink, scope, requestID)
 }
 
 const tokenUpdate = `UPDATE requests SET
@@ -296,11 +316,11 @@ const tokenUpdate = `UPDATE requests SET
 	cached_tokens=MAX(cached_tokens,?), reasoning_tokens=MAX(reasoning_tokens,?), usage_known=1 `
 
 func (s *Store) Tokens(id string, c Counters) error {
-	return s.exec(tokenUpdate+"WHERE id=?", c.InputTokens, c.OutputTokens, c.CachedTokens, c.ReasoningTokens, id)
+	return s.exec(s.sql.tokenUpdate+"WHERE id=?", c.InputTokens, c.OutputTokens, c.CachedTokens, c.ReasoningTokens, id)
 }
 
 func (s *Store) Reconcile(scope string, c Counters) error {
-	return s.exec(tokenUpdate+"WHERE id=(SELECT request_id FROM response_links WHERE scope=?)",
+	return s.exec(s.sql.tokenUpdate+"WHERE id=(SELECT request_id FROM response_links WHERE scope=?)",
 		c.InputTokens, c.OutputTokens, c.CachedTokens, c.ReasoningTokens, scope)
 }
 
@@ -309,7 +329,7 @@ func (s *Store) BindWith(scope, requestID string, bindRoute func() error) error 
 	s.coordinator.RLock()
 	defer s.coordinator.RUnlock()
 	if requestID != "" {
-		if err := s.execLocked("INSERT INTO response_links(scope,request_id) VALUES(?,?) ON CONFLICT(scope) DO NOTHING", scope, requestID); err != nil {
+		if err := s.execLocked(s.sql.bindLink, scope, requestID); err != nil {
 			return err
 		}
 	}

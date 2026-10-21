@@ -10,7 +10,7 @@ import (
 func TestPinnedWALSnapshotDoesNotBlockAccounting(t *testing.T) {
 	for _, empty := range []bool{false, true} {
 		t.Run(map[bool]string{false: "populated", true: "empty"}[empty], func(t *testing.T) {
-			s, err := Open(t.TempDir())
+			s, err := openForTest(t, t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -72,7 +72,7 @@ func TestPinnedWALSnapshotDoesNotBlockAccounting(t *testing.T) {
 }
 
 func TestLiveMergeNeverOverwritesLocalInFlightAndNeverDoubleCounts(t *testing.T) {
-	s, err := Open(t.TempDir())
+	s, err := openForTest(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

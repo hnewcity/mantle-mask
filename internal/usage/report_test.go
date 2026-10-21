@@ -15,11 +15,32 @@ import (
 
 func reportFixture(tb testing.TB, count int) (*Store, config.State) {
 	tb.Helper()
-	s, err := Open(tb.TempDir())
+	s, err := openForTest(tb, tb.TempDir())
 	if err != nil {
 		tb.Fatal(err)
 	}
 	tb.Cleanup(func() { s.Close() })
+	return s, fillReportFixture(tb, s, count)
+}
+
+// reportOracle is the frozen SQLite implementation over the same fixture; on
+// MySQL runs it checks the new backend against the original SQL semantics.
+func reportOracle(tb testing.TB, s *Store, count int) *Store {
+	tb.Helper()
+	if !s.sql.mysql {
+		return s
+	}
+	oracle, err := Open(tb.TempDir())
+	if err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(func() { oracle.Close() })
+	fillReportFixture(tb, oracle, count)
+	return oracle
+}
+
+func fillReportFixture(tb testing.TB, s *Store, count int) config.State {
+	tb.Helper()
 	tx, err := s.db.Begin()
 	if err != nil {
 		tb.Fatal(err)
@@ -107,7 +128,7 @@ func reportFixture(tb testing.TB, count int) (*Store, config.State) {
 			}},
 		}},
 	}
-	return s, state
+	return state
 }
 
 func sameReport(t *testing.T, got, want Report) {
@@ -144,6 +165,7 @@ func TestSinglePassReportMatchesLegacy(t *testing.T) {
 	for _, count := range []int{0, 2500} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			s, prices := reportFixture(t, count)
+			oracle := reportOracle(t, s, count)
 			for _, query := range []string{
 				"all=true", "all=true&timezone_offset=480", "all=true&timezone_offset=-840", "all=true&timezone_offset=840",
 				"all=true&user_id=u1", "all=true&key_id=k2", "all=true&upstream_id=west", "all=true&model=alias",
@@ -161,7 +183,7 @@ func TestSinglePassReportMatchesLegacy(t *testing.T) {
 						if priced {
 							state = prices
 						}
-						want, err := s.legacyReportWithPricing(context.Background(), filter, state)
+						want, err := oracle.legacyReportWithPricing(context.Background(), filter, state)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -202,6 +224,9 @@ func BenchmarkUsageReport(b *testing.B) {
 		b.Run(fmt.Sprint(count), func(b *testing.B) {
 			s, state := reportFixture(b, count)
 			for _, legacy := range []bool{true, false} {
+				if legacy && s.sql.mysql {
+					continue // The frozen baseline uses SQLite-only JSON and date functions.
+				}
 				name := "single_pass"
 				if legacy {
 					name = "v0.3.0"

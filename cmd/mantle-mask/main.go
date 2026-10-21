@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/hnewcity/mantle-mask/internal/config"
 	"github.com/hnewcity/mantle-mask/internal/gateway"
 	"github.com/hnewcity/mantle-mask/internal/server"
+	"github.com/hnewcity/mantle-mask/internal/usage"
 )
 
 func main() {
@@ -35,7 +37,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	proxy, err := gateway.New(store, dir)
+	storage := usage.Options{MySQLDSN: os.Getenv("MANTLE_MYSQL_DSN")}
+	if raw := os.Getenv("MANTLE_MYSQL_IMPORT_SQLITE"); raw != "" {
+		if storage.ImportSQLite, err = strconv.ParseBool(raw); err != nil {
+			return errors.New("MANTLE_MYSQL_IMPORT_SQLITE must be true or false")
+		}
+		if storage.ImportSQLite && storage.MySQLDSN == "" {
+			return errors.New("MANTLE_MYSQL_IMPORT_SQLITE requires MANTLE_MYSQL_DSN")
+		}
+	}
+	proxy, err := gateway.New(store, dir, storage)
 	if err != nil {
 		return err
 	}

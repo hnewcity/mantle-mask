@@ -15,6 +15,7 @@ import (
 
 	"github.com/hnewcity/mantle-mask/internal/config"
 	"github.com/hnewcity/mantle-mask/internal/gateway"
+	"github.com/hnewcity/mantle-mask/internal/usage"
 )
 
 const adminTestToken = "test-admin-token-minimum-24-characters"
@@ -55,7 +56,7 @@ func (f *fixture) restart() {
 		f.t.Fatal(err)
 	}
 	f.store = store
-	f.proxy, err = gateway.New(f.store, f.dir)
+	f.proxy, err = gateway.New(f.store, f.dir, usage.Options{})
 	if err != nil {
 		f.t.Fatal(err)
 	}

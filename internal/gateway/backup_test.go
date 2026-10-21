@@ -21,7 +21,7 @@ func TestRestoreJournalResumesAfterFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := New(store, dir)
+	g, err := New(store, dir, usage.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestRestoreJournalResumesAfterFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err = New(store, dir)
+	g, err = New(store, dir, usage.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestSnapshotDoesNotSplitResponseUsageLinkAndAffinity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := New(store, dir)
+	g, err := New(store, dir, usage.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

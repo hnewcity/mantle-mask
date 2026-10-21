@@ -185,12 +185,26 @@ curl 'http://localhost:8080/api/me/usage?all=true' \
 | `MANTLE_ADMIN_TOKEN` | 自动创建 | 管理令牌，至少 24 字符 |
 | `MANTLE_MASTER_KEY` | `data/master.key` | 可选的 base64 编码 32 字节 AES 主密钥 |
 | `MANTLE_CORS_ORIGINS` | 空 | 逗号分隔的精确 Origin 白名单；同源控制台不需要配置 |
+| `MANTLE_MYSQL_DSN` | 空 | 可选。设置后用量库改用 MySQL，例如 `mantle:密码@tcp(db:3306)/mantle_mask`；为空时使用 `data/usage.db` |
+| `MANTLE_MYSQL_IMPORT_SQLITE` | `false` | 设为 `true` 时，启动时用 `data/usage.db` 整体覆盖 MySQL 用量，见下文 |
+
+### 使用 MySQL 保存用量
+
+设置 `MANTLE_MYSQL_DSN`（[go-sql-driver DSN 格式](https://github.com/go-sql-driver/mysql#dsn-data-source-name)）后，请求记录与用量写入 MySQL，配置、凭据和 Responses 路由仍保存在 `data/`。
+
+- 需要 MySQL 8.0.19 及以上版本。DSN 必须指定库名；库不存在时自动创建（账号需要 `CREATE` 权限），表结构在启动时自动创建。账号还需要该库的 `SELECT`、`INSERT`、`UPDATE`、`DELETE`、`CREATE`、`INDEX`、`REFERENCES` 权限。
+- 网关会为连接强制开启严格模式和 `REPEATABLE-READ` 隔离级别；ID 等字段使用二进制列，与 SQLite 一样区分大小写和尾部空格。
+- 默认不迁移 SQLite 数据，即使 `data/usage.db` 存在。
+- 需要迁移时，设置 `MANTLE_MYSQL_IMPORT_SQLITE=true` 启动一次：先清空 MySQL 中的全部用量记录，再完整导入 `usage.db`，不做合并。在单个事务中完成，失败时 MySQL 保持原样，`usage.db` 只读不改。`usage.db` 不存在时拒绝启动，避免误清空。
+- 迁移完成后（日志出现 `replaced MySQL usage with SQLite history`）务必移除该变量再重启，否则每次启动都会再次覆盖，丢失之后写入 MySQL 的用量。
+- 同一 MySQL 库只允许一个网关实例使用（通过 `GET_LOCK` 检查），第二个实例会拒绝启动。多个网关请各用一个库。
+- 跨网络连接时建议在 DSN 中加 `tls=true` 或 `tls=preferred`；DSN 含密码，不要提交到仓库。
 
 `data/` 包含配置、加密凭据、主密钥、管理员令牌、Responses 路由索引及 SQLite 用量库 `usage.db`（运行时可能有 `-wal` / `-shm` 文件）。可在控制台导出密码加密的完整迁移备份（见下方「完整备份与迁移」）。若直接备份文件，先停止网关，再复制整个目录，避免复制运行中数据库的一部分；文件级备份使用外部主密钥时还要保留对应环境密钥。已有配置缺少主密钥时会拒绝启动。
 
 ## 部署边界
 
-- 当前是单进程、单数据目录实现；不要让多个进程共享写入同一目录。用量采用本地 SQLite；尚未实现分布式路由、配额、限流或金额计费。
+- 当前是单进程、单数据目录实现；不要让多个进程共享写入同一目录。用量默认采用本地 SQLite，可选 MySQL；尚未实现分布式路由、配额、限流或金额计费。
 - 模型发现是按需探测，不是后台健康检查；控制台区分待检测、连接正常、鉴权异常和冷却。
 - 请求体最多 16 MiB；非流式上游正文最多 32 MiB；SSE 单事件观察上限 1 MiB；远端模型列表最多 4 MiB。
 - 连接建立 10 秒，响应头 60 秒；每次流写入 30 秒；完整请求时限默认 300 秒，可在界面调整。

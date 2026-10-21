@@ -70,7 +70,7 @@ func (s *Store) Merge(ctx context.Context, b Backup) error {
 	for start := 0; start < len(b.Requests); start += batchSize {
 		batch := b.Requests[start:min(start+batchSize, len(b.Requests))]
 		if err := s.mergeBatch(ctx, func(tx *sql.Tx) error {
-			stmt, err := tx.PrepareContext(ctx, mergeRequest)
+			stmt, err := tx.PrepareContext(ctx, s.sql.merge)
 			if err != nil {
 				return err
 			}
@@ -97,7 +97,7 @@ func (s *Store) Merge(ctx context.Context, b Backup) error {
 		batch := scopes[start:min(start+batchSize, len(scopes))]
 		if err := s.mergeBatch(ctx, func(tx *sql.Tx) error {
 			for _, scope := range batch {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO response_links(scope,request_id) VALUES(?,?) ON CONFLICT(scope) DO NOTHING", scope, b.Links[scope]); err != nil {
+				if _, err := tx.ExecContext(ctx, s.sql.bindLink, scope, b.Links[scope]); err != nil {
 					return err
 				}
 			}

@@ -10,6 +10,8 @@ services:
       MANTLE_ADMIN_TOKEN: "${MANTLE_ADMIN_TOKEN:-}"
       MANTLE_MASTER_KEY: "${MANTLE_MASTER_KEY:-}"
       MANTLE_CORS_ORIGINS: "${MANTLE_CORS_ORIGINS:-}"
+      MANTLE_MYSQL_DSN: "${MANTLE_MYSQL_DSN:-}"
+      MANTLE_MYSQL_IMPORT_SQLITE: "${MANTLE_MYSQL_IMPORT_SQLITE:-false}"
     volumes:
       - mantle-data:/app/data
     restart: unless-stopped
