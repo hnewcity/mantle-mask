@@ -1,0 +1,68 @@
+name: Publish Docker Hub
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Full Git commit already built and verified by CI
+        required: true
+        default: 7cfc85210ce04294c8b08165c36e6ba57358dca3
+      source_digest:
+        description: Verified GHCR multi-platform image index digest
+        required: true
+        default: sha256:056a57daa676373c8ab31bc303ee78b941059ba629dd99a4d7e3818af62d4514
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dockerhub-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      REVISION: ${{ inputs.revision }}
+      SOURCE_DIGEST: ${{ inputs.source_digest }}
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.revision }}
+      - uses: docker/setup-buildx-action@v4
+      - name: Verify exact image and run container checks
+        shell: bash
+        run: |
+          source="ghcr.io/hnewcity/mantle-mask@$SOURCE_DIGEST"
+          docker pull --platform linux/amd64 "$source"
+          actual=$(docker image inspect "$source" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+          [[ "$actual" == "$REVISION" ]]
+          bash scripts/docker-smoke.sh "$source"
+      - name: Publish and verify Docker Hub tags
+        shell: bash
+        env:
+          DOCKERHUB_CONFIG: ${{ secrets.MANTLE_DOCKERHUB_CONFIG }}
+        run: |
+          test -n "$DOCKERHUB_CONFIG"
+          umask 077
+          export DOCKER_CONFIG="$HOME/.docker"
+          mkdir -p "$DOCKER_CONFIG"
+          trap 'rm -f "$DOCKER_CONFIG/config.json"' EXIT
+          printf '%s' "$DOCKERHUB_CONFIG" > "$DOCKER_CONFIG/config.json"
+          source="ghcr.io/hnewcity/mantle-mask@$SOURCE_DIGEST"
+          target="docker.io/hnewcity/mantle-mask"
+          sha_tag="sha-${REVISION:0:7}"
+          docker buildx imagetools create --tag "$target:$sha_tag" "$source"
+          actual=$(docker buildx imagetools inspect "$target:$sha_tag" --format '{{.Manifest.Digest}}')
+          [[ "$actual" == "$SOURCE_DIGEST" ]]
+          docker buildx imagetools create --tag "$target:latest" "$target@$SOURCE_DIGEST"
+          actual=$(docker buildx imagetools inspect "$target:latest" --format '{{.Manifest.Digest}}')
+          [[ "$actual" == "$SOURCE_DIGEST" ]]
+          docker buildx imagetools inspect "$target:latest"
+          printf 'Published `%s:latest` and `%s:%s`\n\nDigest: `%s`\n' "$target" "$target" "$sha_tag" "$SOURCE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
