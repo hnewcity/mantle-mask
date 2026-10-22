@@ -157,6 +157,8 @@ print(response.output_text)
 
 工具调用、推理参数、结构化输出和多模态字段按请求透传，是否支持取决于实际上游模型。完整端点、流式、多轮和用量说明见 [API 指南](docs/guide.md)。
 
+临时上游 API Key 可通过 `PUT /api/admin/upstreams/{id}/api-key` 在线更新，无需重启。使用管理员令牌调用，curl 和 PowerShell 示例见 [命令更新上游 API Key](docs/upstream-api-key.md)。
+
 <a id="docker"></a>
 
 ## 🐳 Docker 与自动发布

@@ -88,6 +88,7 @@ func (s *Server) routes() {
 	admin.GET("/upstreams", s.listUpstreams)
 	admin.POST("/upstreams", s.saveUpstream)
 	admin.PUT("/upstreams/:id", s.saveUpstream)
+	admin.PUT("/upstreams/:id/api-key", s.updateUpstreamAPIKey)
 	admin.DELETE("/upstreams/:id", s.deleteUpstream)
 	admin.POST("/upstreams/:id/test", s.testUpstream)
 	admin.GET("/keys", s.listKeys)
