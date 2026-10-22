@@ -6,11 +6,12 @@ on:
       revision:
         description: Full Git commit already built and verified by CI
         required: true
-        default: 7cfc85210ce04294c8b08165c36e6ba57358dca3
       source_digest:
         description: Verified GHCR multi-platform image index digest
         required: true
-        default: sha256:056a57daa676373c8ab31bc303ee78b941059ba629dd99a4d7e3818af62d4514
+      version:
+        description: Optional stable release version without the v prefix
+        required: false
 
 permissions:
   contents: read
@@ -26,12 +27,14 @@ jobs:
     env:
       REVISION: ${{ inputs.revision }}
       SOURCE_DIGEST: ${{ inputs.source_digest }}
+      VERSION: ${{ inputs.version }}
     steps:
       - name: Validate inputs
         shell: bash
         run: |
           [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$SOURCE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ -z "$VERSION" || "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.revision }}
@@ -61,6 +64,14 @@ jobs:
           docker buildx imagetools create --tag "$target:$sha_tag" "$source"
           actual=$(docker buildx imagetools inspect "$target:$sha_tag" --format '{{.Manifest.Digest}}')
           [[ "$actual" == "$SOURCE_DIGEST" ]]
+          if [[ -n "$VERSION" ]]; then
+            minor="${VERSION%.*}"
+            docker buildx imagetools create --tag "$target:$VERSION" --tag "$target:$minor" "$target@$SOURCE_DIGEST"
+            for tag in "$VERSION" "$minor"; do
+              actual=$(docker buildx imagetools inspect "$target:$tag" --format '{{.Manifest.Digest}}')
+              [[ "$actual" == "$SOURCE_DIGEST" ]]
+            done
+          fi
           docker buildx imagetools create --tag "$target:latest" "$target@$SOURCE_DIGEST"
           actual=$(docker buildx imagetools inspect "$target:latest" --format '{{.Manifest.Digest}}')
           [[ "$actual" == "$SOURCE_DIGEST" ]]
