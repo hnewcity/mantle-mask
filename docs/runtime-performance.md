@@ -53,6 +53,35 @@ go test ./internal/config ./internal/gateway -run '^$' \
 
 没有改 SQLite 同步落盘设置，没有把计量写入改成可能丢失的异步批量写，也没有添加返回过期费用的报表缓存。Responses 首次绑定仍需成功落盘后才继续。
 
-高规模下，Responses 路由文件的全量持久化、SQLite 写入和大范围历史扫描仍可能成为瓶颈。将路由文件改为增量存储涉及恢复、备份和迁移协议，应结合实际负载剖析另行验证，而不是在本轮静默降低可靠性。
+高规模下，SQLite 写入和大范围历史扫描仍可能成为瓶颈。
+
+## 小内存部署
+
+Responses 路由已改为增量存储：`affinity.json` 是快照，`affinity.json.log` 是每行一条、逐条 fsync 的追加日志。启动时重放日志并合并，仅容忍最后一行不完整（崩溃中断的写入），中间损坏则拒绝启动；日志条数达到 max(1024, 绑定数) 或正常关闭时合并回快照，所以旧版本仍能读取正常停止后的数据目录。备份格式不变。
+
+进程启动时若未设置 `GOMEMLIMIT`，会读取 cgroup v2/v1 与 `/proc/meminfo`，取最小值的 70% 作为 Go 软内存上限，其余留给 SQLite 页缓存、栈与二进制本身。需要自定义时显式设置 `GOMEMLIMIT`（例如 `GOMEMLIMIT=300MiB`）。
+
+```bash
+go test ./internal/gateway -run '^$' -bench 'BenchmarkAffinityPut|BenchmarkProxyLargeStreamingBody' -benchmem -benchtime=20x
+```
+
+| 操作 | 优化前 B/op | 优化后 B/op |
+| --- | ---: | ---: |
+| 已有 1,000 条绑定时新增一条 | 1,287,372 | 783 |
+| 已有 20,000 条绑定时新增一条 | 25,112,744 | 706 |
+| 1 MB 流式 Chat 请求（含模型映射、`include_usage` 补全） | 6,294,062 | 4,630,430 |
+
+### 进程级实测
+
+macOS 本机运行编译后的二进制，对照 v0.4.0（`eea9f7e`）。macOS 的 RSS 会把 Go 已释放、内核尚未回收的页计入，因此以 `GODEBUG=gctrace=1` 中 GC 后存活堆为准。
+
+- **常规推理负载**：8 个并发客户端混合 1 MB 流式 Chat、200 KB Responses（每次新建路由绑定）与控制台轮询，6 分钟 2.1 万次请求，GC 后存活堆始终在 7–15 MB，只随路由绑定数线性增长（上限 10 万条）。未发现持续增长的泄漏。
+- **备份**：30 万条用量记录、一半带 Responses 链接（`usage.db` 116 MiB，备份 124 MiB），`GOMEMLIMIT=358MiB`：
+
+| 阶段 | v0.4.0 存活堆峰值 | 当前 |
+| --- | ---: | ---: |
+| 导出 + 恢复（仅用量） | ~790 MB | ~290 MB |
+
+恢复仍需把整个备份读入内存：AES-GCM 必须验证完整密文后才能交出明文，分块流式解密需要更改备份格式。用量历史很大的实例建议用停机复制数据目录迁移。
 
 本轮验证命令：`go test -race -p 1 ./...`、`go vet ./...`、`npm --prefix web test`、`npm --prefix web run build`、`npm --prefix web run test:e2e`。

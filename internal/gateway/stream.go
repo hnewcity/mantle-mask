@@ -166,6 +166,11 @@ func (o *observer) write(chunk []byte) error {
 				}
 			}
 			o.event = o.event[:0]
+			if cap(o.event) > 64<<10 {
+				// Responses repeat the whole output in response.completed. Do not
+				// keep a megabyte buffer per idle stream for the rest of its life.
+				o.event = nil
+			}
 		} else if bytes.HasPrefix(line, []byte("data:")) {
 			part := bytes.TrimPrefix(line[5:], []byte(" "))
 			if len(o.event)+len(part) > 1<<20 {
@@ -175,6 +180,9 @@ func (o *observer) write(chunk []byte) error {
 			o.event = append(o.event, '\n')
 		}
 		o.line = o.line[:0]
+		if cap(o.line) > 64<<10 {
+			o.line = nil
+		}
 	}
 	return nil
 }

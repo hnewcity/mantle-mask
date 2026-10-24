@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"strings"
 
 	"github.com/hnewcity/mantle-mask/internal/backup"
 )
@@ -86,8 +89,8 @@ func (v *Snapshot) export(ctx context.Context, limit int) (Backup, error) {
 		return out, err
 	}
 	for rows.Next() {
-		var r BackupRequest
-		if err = rows.Scan(&r.ID, &r.StartedAt, &r.UserID, &r.UserName, &r.KeyID, &r.KeyName, &r.Model, &r.Path, &r.Status, &r.Attempts, &r.DurationMS, &r.Completed, &r.InputTokens, &r.OutputTokens, &r.CachedTokens, &r.ReasoningTokens, &r.UsageKnown, &r.UpstreamID, &r.UpstreamName); err != nil {
+		r, err := scanBackupRequest(rows)
+		if err != nil {
 			rows.Close()
 			return out, err
 		}
@@ -136,6 +139,151 @@ func (v *Snapshot) export(ctx context.Context, limit int) (Backup, error) {
 		return out, err
 	}
 	return out, tx.Commit()
+}
+
+func scanBackupRequest(rows *sql.Rows) (BackupRequest, error) {
+	var r BackupRequest
+	err := rows.Scan(&r.ID, &r.StartedAt, &r.UserID, &r.UserName, &r.KeyID, &r.KeyName, &r.Model, &r.Path, &r.Status, &r.Attempts, &r.DurationMS, &r.Completed, &r.InputTokens, &r.OutputTokens, &r.CachedTokens, &r.ReasoningTokens, &r.UsageKnown, &r.UpstreamID, &r.UpstreamName)
+	return r, err
+}
+
+// WriteJSON streams the pinned view as the JSON encoding of a Backup without
+// materializing the request history. It leaves the snapshot open, so the same
+// view can be streamed again with identical content.
+func (v *Snapshot) WriteJSON(ctx context.Context, w io.Writer) error {
+	out := &jsonWriter{w: w}
+	out.raw(`{"requests":[`)
+	rows, err := v.tx.QueryContext(ctx, "SELECT "+backupColumns+" FROM requests ORDER BY id")
+	if err != nil {
+		return err
+	}
+	for i := 0; rows.Next() && out.err == nil; i++ {
+		r, err := scanBackupRequest(rows)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		out.item(i, r)
+	}
+	err = errors.Join(rows.Err(), rows.Close())
+	if err != nil || out.err != nil {
+		return errors.Join(out.err, err)
+	}
+	out.raw(`],"response_links":{`)
+	rows, err = v.tx.QueryContext(ctx, "SELECT scope,request_id FROM response_links ORDER BY scope")
+	if err != nil {
+		return err
+	}
+	for i := 0; rows.Next() && out.err == nil; i++ {
+		var scope, id string
+		if err := rows.Scan(&scope, &id); err != nil {
+			rows.Close()
+			return err
+		}
+		out.member(i, scope, id)
+	}
+	err = errors.Join(rows.Err(), rows.Close())
+	if err != nil || out.err != nil {
+		return errors.Join(out.err, err)
+	}
+	out.raw(`}}`)
+	return out.err
+}
+
+// WriteBackupJSON streams an in-memory Backup with the same encoding as
+// json.Marshal, but without building the whole document first.
+func WriteBackupJSON(w io.Writer, b Backup) error {
+	out := &jsonWriter{w: w}
+	out.raw(`{"requests":[`)
+	for i, r := range b.Requests {
+		out.item(i, r)
+	}
+	out.raw(`],"response_links":{`)
+	i := 0
+	for scope, id := range b.Links {
+		out.member(i, scope, id)
+		i++
+	}
+	out.raw(`}}`)
+	return out.err
+}
+
+// DecodeBackupJSON reads the value written by WriteJSON one record at a time,
+// so a large history is never buffered as a whole document. Field names match
+// case-insensitively and unknown fields are rejected, like a json.Decoder with
+// DisallowUnknownFields, which the caller must set on dec.
+func DecodeBackupJSON(dec *json.Decoder) (Backup, error) {
+	var b Backup
+	// Most columns repeat across rows; share one copy of each distinct value.
+	seen := map[string]string{}
+	intern := func(s *string) {
+		if v, ok := seen[*s]; ok {
+			*s = v
+		} else if len(seen) < 1<<16 {
+			seen[*s] = *s
+		}
+	}
+	err := backup.DecodeObject(dec, func(name string) error {
+		switch {
+		case strings.EqualFold(name, "requests"):
+			b.Requests = []BackupRequest{}
+			null, err := backup.DecodeArray(dec, func() error {
+				var r BackupRequest
+				if err := dec.Decode(&r); err != nil {
+					return err
+				}
+				for _, s := range []*string{&r.UserID, &r.UserName, &r.KeyID, &r.KeyName, &r.Model, &r.Path, &r.UpstreamID, &r.UpstreamName} {
+					intern(s)
+				}
+				b.Requests = append(b.Requests, r)
+				return nil
+			})
+			if null {
+				b.Requests = nil
+			}
+			return err
+		case strings.EqualFold(name, "response_links"):
+			b.Links = nil
+			return dec.Decode(&b.Links)
+		default:
+			return fmt.Errorf("json: unknown field %q", name)
+		}
+	})
+	return b, err
+}
+
+// jsonWriter keeps the first write or encoding error.
+type jsonWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (j *jsonWriter) raw(s string) {
+	if j.err == nil {
+		_, j.err = io.WriteString(j.w, s)
+	}
+}
+
+func (j *jsonWriter) value(v any) {
+	if j.err == nil {
+		var b []byte
+		if b, j.err = json.Marshal(v); j.err == nil {
+			_, j.err = j.w.Write(b)
+		}
+	}
+}
+
+func (j *jsonWriter) item(i int, v any) {
+	if i > 0 {
+		j.raw(",")
+	}
+	j.value(v)
+}
+
+func (j *jsonWriter) member(i int, key string, v any) {
+	j.item(i, key)
+	j.raw(":")
+	j.value(v)
 }
 
 func (b Backup) Validate() error {

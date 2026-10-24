@@ -117,10 +117,28 @@ func (g *Gateway) upstreamRequest(ctx context.Context, u config.Upstream, method
 	return g.client.Do(req)
 }
 
-func boundedRead(reader io.Reader, limit int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
-	if err != nil {
-		return nil, err
+// boundedRead is io.ReadAll with a limit. A declared length sizes the first
+// buffer to avoid repeated doubling. It is capped at 1 MiB so a client cannot
+// make the gateway reserve the full limit by only sending a large header.
+func boundedRead(reader io.Reader, limit, sizeHint int64) ([]byte, error) {
+	capacity := int64(512)
+	if sizeHint > 0 {
+		capacity = min(sizeHint, limit, 1<<20) + 1
+	}
+	data := make([]byte, 0, capacity)
+	reader = io.LimitReader(reader, limit+1)
+	for {
+		n, err := reader.Read(data[len(data):cap(data)])
+		data = data[:len(data)+n]
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(data) == cap(data) {
+			data = append(data, 0)[:len(data)]
+		}
 	}
 	if int64(len(data)) > limit {
 		return nil, errors.New("upstream response exceeds size limit")
@@ -151,7 +169,7 @@ func (g *Gateway) discover(ctx context.Context, u config.Upstream, project strin
 		g.runtime.mark(u, resp.StatusCode, time.Since(start), 0, fmt.Sprintf("模型列表返回 HTTP %d", resp.StatusCode))
 		return nil, fmt.Errorf("model discovery returned HTTP %d", resp.StatusCode)
 	}
-	data, err := boundedRead(resp.Body, 4<<20)
+	data, err := boundedRead(resp.Body, 4<<20, resp.ContentLength)
 	if err != nil {
 		return nil, errors.New("could not read upstream models")
 	}

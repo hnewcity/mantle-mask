@@ -28,6 +28,7 @@ func main() {
 
 func run() error {
 	gin.SetMode(gin.ReleaseMode)
+	applyMemoryLimit()
 	dir := env("MANTLE_DATA_DIR", "./data")
 	store, err := config.Open(dir, os.Getenv("MANTLE_MASTER_KEY"))
 	if err != nil {

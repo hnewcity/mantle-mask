@@ -1,8 +1,10 @@
 package gateway
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -235,19 +237,85 @@ type affinityStore struct {
 	mu       sync.Mutex
 	path     string
 	bindings map[string]Binding
+	journal  *os.File // append-only puts since the last snapshot of path
+	size     int64    // journal length after the last complete append
+	logged   int      // entries in the journal
 }
 
+type affinityEntry struct {
+	Scope   string  `json:"scope"`
+	Binding Binding `json:"binding"`
+}
+
+const affinityCapacity = 100000
+
+// openAffinity loads the last snapshot, replays the journal on top of it, then
+// compacts so new appends never follow a record torn by a crash.
 func openAffinity(dir string) (*affinityStore, error) {
 	s := &affinityStore{path: filepath.Join(dir, "affinity.json"), bindings: map[string]Binding{}}
 	data, err := os.ReadFile(s.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return s, nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
+	if err == nil {
+		if err := json.Unmarshal(data, &s.bindings); err != nil {
+			return nil, err
+		}
+		if s.bindings == nil {
+			s.bindings = map[string]Binding{}
+		}
+	}
+	data = nil
+	s.journal, err = os.OpenFile(s.journalPath(), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, err
 	}
-	err = json.Unmarshal(data, &s.bindings)
-	return s, err
+	replayed, err := s.replay()
+	if err == nil && replayed {
+		err = s.replaceLocked(s.bindings)
+	}
+	if err != nil {
+		_ = s.journal.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *affinityStore) journalPath() string { return s.path + ".log" }
+
+func (s *affinityStore) replay() (bool, error) {
+	info, err := s.journal.Stat()
+	if err != nil || info.Size() == 0 {
+		return false, err
+	}
+	scanner := bufio.NewScanner(io.NewSectionReader(s.journal, 0, info.Size()))
+	scanner.Buffer(make([]byte, 0, 4<<10), 1<<20)
+	torn := false
+	for scanner.Scan() {
+		if torn {
+			return true, errors.New("corrupt response routing journal")
+		}
+		var entry affinityEntry
+		if json.Unmarshal(scanner.Bytes(), &entry) != nil || entry.Scope == "" {
+			// Only the final record can be incomplete after a crash.
+			torn = true
+			continue
+		}
+		s.bindings[entry.Scope] = entry.Binding
+	}
+	return true, scanner.Err()
+}
+
+// close folds the journal into affinity.json on a clean shutdown, so the data
+// directory stays readable by versions without the journal. Failure is not
+// fatal: the journal still holds every record and is replayed on next open.
+func (s *affinityStore) close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.logged > 0 {
+		_ = s.replaceLocked(s.bindings)
+	}
+	return s.journal.Close()
 }
 
 func scopeKey(principal, project, id string) string {
@@ -265,26 +333,103 @@ func (s *affinityStore) get(scope string) (Binding, bool) {
 	return b, ok && time.Now().Before(b.Expires)
 }
 
+// put durably appends one record instead of rewriting every binding, so the
+// cost of creating a response no longer grows with the retained history.
 func (s *affinityStore) put(scope string, binding Binding) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if old, ok := s.bindings[scope]; ok && old.UpstreamID == binding.UpstreamID && old.Fingerprint == binding.Fingerprint {
 		return nil
 	}
-	next := make(map[string]Binding, len(s.bindings)+1)
-	for key, b := range s.bindings {
-		if time.Now().Before(b.Expires) {
-			next[key] = b
+	if _, exists := s.bindings[scope]; !exists && len(s.bindings) >= affinityCapacity {
+		s.pruneExpiredLocked()
+		if len(s.bindings) >= affinityCapacity {
+			return errors.New("response routing capacity reached")
 		}
 	}
-	if len(next) >= 100000 {
-		return errors.New("response routing capacity reached")
-	}
-	next[scope] = binding
-	if err := config.AtomicJSON(s.path, next); err != nil {
+	line, err := json.Marshal(affinityEntry{Scope: scope, Binding: binding})
+	if err != nil {
 		return err
 	}
-	s.bindings = next
+	line = append(line, '\n')
+	if _, err = s.journal.Write(line); err == nil {
+		err = s.journal.Sync()
+	}
+	if err != nil {
+		// Drop a partial record so later appends stay line-aligned.
+		_ = s.journal.Truncate(s.size)
+		return err
+	}
+	s.size += int64(len(line))
+	s.logged++
+	s.bindings[scope] = binding
+	if s.logged >= max(1024, len(s.bindings)) {
+		// Amortized compaction; the journal already holds the record durably.
+		_ = s.replaceLocked(s.bindings)
+	}
+	return nil
+}
+
+func (s *affinityStore) pruneExpiredLocked() {
+	now := time.Now()
+	for key, b := range s.bindings {
+		if !now.Before(b.Expires) {
+			delete(s.bindings, key)
+		}
+	}
+}
+
+// replaceLocked publishes bindings as the new snapshot and empties the
+// journal. Expired bindings are dropped. The caller holds s.mu.
+func (s *affinityStore) replaceLocked(bindings map[string]Binding) error {
+	now := time.Now()
+	err := config.AtomicWrite(s.path, func(w io.Writer) error {
+		if _, err := io.WriteString(w, "{"); err != nil {
+			return err
+		}
+		first := true
+		for key, b := range bindings {
+			if !now.Before(b.Expires) {
+				continue
+			}
+			k, err := json.Marshal(key)
+			if err != nil {
+				return err
+			}
+			v, err := json.Marshal(b)
+			if err != nil {
+				return err
+			}
+			if !first {
+				if _, err := io.WriteString(w, ","); err != nil {
+					return err
+				}
+			}
+			first = false
+			if _, err := w.Write(k); err != nil {
+				return err
+			}
+			if _, err := io.WriteString(w, ":"); err != nil {
+				return err
+			}
+			if _, err := w.Write(v); err != nil {
+				return err
+			}
+		}
+		_, err := io.WriteString(w, "}")
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	s.bindings = bindings
+	s.pruneExpiredLocked()
+	// The snapshot already contains every journaled record, so replaying a
+	// journal that failed to truncate is harmless.
+	if err := s.journal.Truncate(0); err != nil {
+		return err
+	}
+	s.size, s.logged = 0, 0
 	return nil
 }
 

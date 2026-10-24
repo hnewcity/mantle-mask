@@ -74,8 +74,10 @@ func (s *Syncer) get(ctx context.Context, url string) ([]byte, error) {
 
 type fetchResult struct {
 	source, region string
-	data           []byte
 	err            error
+	count          int
+	aws            map[string]config.ModelPrice
+	catalog        map[string]json.RawMessage
 }
 
 // Sync preserves last-good entries only for regions whose every source failed.
@@ -127,10 +129,25 @@ func (s *Syncer) Sync(ctx context.Context, old *config.PriceCatalog, inputRegion
 			if job.source == "aws" {
 				url = fmt.Sprintf(s.awsURL, job.region)
 			}
-			job.data, job.err = s.get(ctx, url)
-			if job.err == nil && downloaded.Add(int64(len(job.data))) > 128<<20 {
+			data, err := s.get(ctx, url)
+			job.err = err
+			if err == nil && downloaded.Add(int64(len(data))) > 128<<20 {
 				job.err = errors.New("total pricing download exceeds 128 MiB")
-				job.data = nil
+			}
+			// Parse while the worker still holds the semaphore, so at most four
+			// raw documents are alive instead of every downloaded region.
+			if job.err == nil {
+				switch job.source {
+				case "aws":
+					job.aws, job.err = parseAWS(data, job.region)
+					job.count = len(job.aws)
+				case "litellm":
+					job.catalog, job.err = parseLiteCatalog(data)
+					job.count = len(job.catalog)
+				case "models.dev":
+					job.catalog, job.err = parseModelsCatalog(data)
+					job.count = len(job.catalog)
+				}
 			}
 			results[i] = job
 		}(i, job)
@@ -146,24 +163,17 @@ func (s *Syncer) Sync(ctx context.Context, old *config.PriceCatalog, inputRegion
 	awsOK := map[string]bool{}
 	liteOK, modelsOK := false, false
 	for _, result := range results {
-		count := 0
 		if result.err == nil {
 			switch result.source {
 			case "aws":
-				aws[result.region], result.err = parseAWS(result.data, result.region)
-				count = len(aws[result.region])
-				awsOK[result.region] = result.err == nil
+				aws[result.region], awsOK[result.region] = result.aws, true
 			case "litellm":
-				lite, result.err = parseLiteCatalog(result.data)
-				count = len(lite)
-				liteOK = result.err == nil
+				lite, liteOK = result.catalog, true
 			case "models.dev":
-				models, result.err = parseModelsCatalog(result.data)
-				count = len(models)
-				modelsOK = result.err == nil
+				models, modelsOK = result.catalog, true
 			}
 		}
-		status := config.PriceSourceStatus{Source: result.source, Region: result.region, Success: result.err == nil, Models: count}
+		status := config.PriceSourceStatus{Source: result.source, Region: result.region, Success: result.err == nil, Models: result.count}
 		if result.err != nil {
 			status.Error = shortError(result.err)
 			out.Warnings = append(out.Warnings, result.source+" "+result.region+": "+status.Error)

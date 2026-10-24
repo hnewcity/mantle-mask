@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bufio"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -191,13 +193,25 @@ func AtomicJSON(path string, value any) error {
 	if err != nil {
 		return err
 	}
+	return AtomicWrite(path, func(w io.Writer) error {
+		_, err := w.Write(b)
+		return err
+	})
+}
+
+// AtomicWrite is AtomicJSON for content streamed by write, so large files do
+// not need to be materialized in memory first.
+func AtomicWrite(path string, write func(io.Writer) error) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".mantle-*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(f.Name())
 	if err = f.Chmod(0600); err == nil {
-		_, err = f.Write(b)
+		buffered := bufio.NewWriterSize(f, 64<<10)
+		if err = write(buffered); err == nil {
+			err = buffered.Flush()
+		}
 	}
 	if err == nil {
 		err = f.Sync()

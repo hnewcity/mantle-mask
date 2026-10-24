@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
+	"io"
 	"unicode/utf8"
 )
 
@@ -39,26 +40,75 @@ func aead(password string, salt []byte) (cipher.AEAD, error) {
 }
 
 func Encrypt(plain []byte, password string) ([]byte, error) {
+	return EncryptStream(func(w io.Writer) error {
+		_, err := w.Write(plain)
+		return err
+	}, password)
+}
+
+const headerSize = len(magic) + saltSize
+const maxPlain = MaxSize - headerSize - 28
+
+// EncryptStream encrypts the document produced by write. write is called
+// twice and must produce the same number of bytes each time: the first pass
+// only measures, the second fills one exactly sized buffer that is then
+// encrypted in place. The plaintext therefore exists once in memory, inside
+// the archive buffer itself, instead of as a growing buffer plus a copy.
+func EncryptStream(write func(io.Writer) error, password string) ([]byte, error) {
 	if err := ValidatePassword(password); err != nil {
 		return nil, err
 	}
-	if len(plain) > MaxSize-len(magic)-saltSize-28 {
-		return nil, ErrTooLarge
-	}
-	header := make([]byte, len(magic)+saltSize)
-	copy(header, magic)
-	if _, err := rand.Read(header[len(magic):]); err != nil {
+	size := &countWriter{}
+	if err := write(size); err != nil {
 		return nil, err
 	}
-	cipher, err := aead(password, header[len(magic):])
+	// 12-byte random nonce and 16-byte tag around the ciphertext.
+	fill := &fillWriter{buf: make([]byte, headerSize, headerSize+size.n+28)}
+	if err := write(fill); err != nil {
+		return nil, err
+	}
+	if len(fill.buf) != headerSize+size.n {
+		return nil, errors.New("backup content changed while it was being encrypted")
+	}
+	buf := fill.buf
+	copy(buf, magic)
+	if _, err := rand.Read(buf[len(magic):headerSize]); err != nil {
+		return nil, err
+	}
+	cipher, err := aead(password, buf[len(magic):headerSize])
 	if err != nil {
 		return nil, err
 	}
-	sealed := cipher.Seal(nil, nil, plain, header)
-	return append(header, sealed...), nil
+	header := buf[:headerSize:headerSize]
+	return cipher.Seal(header, nil, buf[headerSize:], header), nil
+}
+
+type countWriter struct{ n int }
+
+func (c *countWriter) Write(p []byte) (int, error) {
+	if c.n += len(p); c.n > maxPlain {
+		return 0, ErrTooLarge
+	}
+	return len(p), nil
+}
+
+type fillWriter struct{ buf []byte }
+
+func (f *fillWriter) Write(p []byte) (int, error) {
+	if len(f.buf)+len(p) > cap(f.buf)-28 {
+		return 0, errors.New("backup content changed while it was being encrypted")
+	}
+	f.buf = append(f.buf, p...)
+	return len(p), nil
 }
 
 func Decrypt(data []byte, password string) ([]byte, error) {
+	return DecryptInPlace(bytes.Clone(data), password)
+}
+
+// DecryptInPlace reuses data for the plaintext instead of allocating a second
+// archive-sized buffer. data is overwritten whether or not decryption succeeds.
+func DecryptInPlace(data []byte, password string) ([]byte, error) {
 	if err := ValidatePassword(password); err != nil {
 		return nil, err
 	}
@@ -70,7 +120,7 @@ func Decrypt(data []byte, password string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	plain, err := cipher.Open(nil, nil, data[n:], data[:n])
+	plain, err := cipher.Open(data[n:n], nil, data[n:], data[:n])
 	if err != nil {
 		return nil, errors.New("备份密码错误或文件已损坏")
 	}

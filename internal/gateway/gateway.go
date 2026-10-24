@@ -46,6 +46,7 @@ func New(store *config.Store, dir string, storage usage.Options) (*Gateway, erro
 	}
 	accounting, err := usage.OpenStore(dir, storage)
 	if err != nil {
+		_ = affinity.close()
 		return nil, err
 	}
 	accounting.SetCoordinator(store.Coordinator())
@@ -107,7 +108,10 @@ func validRoute(method, path string) bool {
 	return false
 }
 
-func (g *Gateway) Close() error { g.client.CloseIdleConnections(); return g.usage.Close() }
+func (g *Gateway) Close() error {
+	g.client.CloseIdleConnections()
+	return errors.Join(g.usage.Close(), g.affinity.close())
+}
 func (g *Gateway) Usage(ctx context.Context, f usage.Filter) (usage.Report, error) {
 	return g.usage.ReportWithPricing(ctx, f, g.store.PricingSnapshot())
 }
@@ -255,10 +259,10 @@ func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, princip
 		accounted = true
 	}
 	body := []byte(nil)
-	fields := map[string]json.RawMessage{}
+	fields := requestObject{}
 	if r.Method == http.MethodPost {
 		var err error
-		body, err = boundedRead(r.Body, 16<<20)
+		body, err = boundedRead(r.Body, 16<<20, r.ContentLength)
 		if err != nil {
 			fail(413, "request_too_large", "Request body could not be read or exceeds 16 MiB.")
 			return
@@ -266,30 +270,31 @@ func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, princip
 		if len(body) == 0 && strings.HasSuffix(path, "/cancel") {
 			body = []byte("{}")
 		}
-		if !json.Valid(body) || json.Unmarshal(body, &fields) != nil || fields == nil {
+		var ok bool
+		if fields, ok = parseObject(body); !ok {
 			fail(400, "invalid_json", "Request body must be one JSON object.")
 			return
 		}
 	}
 	var model, previous string
-	if raw, ok := fields["model"]; ok && (json.Unmarshal(raw, &model) != nil || model == "") {
+	if raw, ok := fields.get("model"); ok && (json.Unmarshal(raw, &model) != nil || model == "") {
 		fail(400, "invalid_model", "model must be a non-empty string.")
 		return
 	}
-	if raw, ok := fields["previous_response_id"]; ok && string(raw) != "null" {
+	if raw, ok := fields.get("previous_response_id"); ok && string(raw) != "null" {
 		if json.Unmarshal(raw, &previous) != nil || !resourceID.MatchString(previous) {
 			fail(400, "invalid_previous_response_id", "previous_response_id must be a response ID.")
 			return
 		}
 	}
-	if raw, ok := fields["stream"]; ok && json.Unmarshal(raw, &log.Stream) != nil {
+	if raw, ok := fields.get("stream"); ok && json.Unmarshal(raw, &log.Stream) != nil {
 		fail(400, "invalid_stream", "stream must be a boolean.")
 		return
 	}
 	if path == "/chat/completions" && log.Stream {
 		// Ask for reported streaming usage unless the caller explicitly opts out.
 		options := map[string]json.RawMessage{}
-		if raw, ok := fields["stream_options"]; ok && string(raw) != "null" {
+		if raw, ok := fields.get("stream_options"); ok && string(raw) != "null" {
 			if json.Unmarshal(raw, &options) != nil || options == nil {
 				fail(400, "invalid_stream_options", "stream_options must be an object.")
 				return
@@ -297,8 +302,9 @@ func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, princip
 		}
 		if _, exists := options["include_usage"]; !exists {
 			options["include_usage"] = json.RawMessage("true")
-			fields["stream_options"], _ = json.Marshal(options)
-			body, _ = json.Marshal(fields)
+			encoded, _ := json.Marshal(options)
+			body = fields.with("stream_options", encoded)
+			fields, _ = indexObject(body)
 		}
 	}
 	log.Model = model
@@ -308,7 +314,7 @@ func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, princip
 	}
 	// Conversations API IDs need their own routing registry. Reject instead of
 	// silently moving a server-side conversation between accounts or regions.
-	if raw, ok := fields["conversation"]; ok && string(raw) != "null" {
+	if raw, ok := fields.get("conversation"); ok && string(raw) != "null" {
 		fail(400, "unsupported_conversation", "Use previous_response_id or explicit input history; Conversations API routing is not supported.")
 		return
 	}
@@ -361,11 +367,8 @@ func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, princip
 		}
 		payload := body
 		if mapped, exists := u.Models[model]; exists && mapped != model {
-			fields["model"], _ = json.Marshal(mapped)
-			payload, _ = json.Marshal(fields)
-		} else if model != "" {
-			// Undo any mapping from a previous failed attempt.
-			fields["model"], _ = json.Marshal(model)
+			encoded, _ := json.Marshal(mapped)
+			payload = fields.with("model", encoded)
 		}
 		attemptStart := time.Now()
 		resp, err := g.upstreamRequest(ctx, u, r.Method, path, r.URL.RawQuery, payload, r.Header, project)
@@ -386,7 +389,7 @@ func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, princip
 		g.runtime.mark(u, resp.StatusCode, time.Since(attemptStart), cooldown, "")
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			lastStatus, lastCode, lastHeaders = resp.StatusCode, "upstream_error", resp.Header
-			raw, _ := boundedRead(resp.Body, 1<<20)
+			raw, _ := boundedRead(resp.Body, 1<<20, resp.ContentLength)
 			_ = resp.Body.Close()
 			lastBody = g.redactError(raw, u)
 			if retryable(resp.StatusCode) && pinned == "" {
@@ -395,7 +398,7 @@ func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, princip
 			break
 		}
 		expectedChoices := 1
-		if raw, ok := fields["n"]; ok {
+		if raw, ok := fields.get("n"); ok {
 			var n int
 			if json.Unmarshal(raw, &n) == nil && n > 0 {
 				expectedChoices = n
@@ -495,7 +498,7 @@ func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, princip
 				_ = controller.SetWriteDeadline(time.Time{})
 			}
 		} else {
-			data, err := boundedRead(resp.Body, 32<<20)
+			data, err := boundedRead(resp.Body, 32<<20, resp.ContentLength)
 			_ = resp.Body.Close()
 			if err != nil {
 				fail(502, "upstream_read_failed", "Could not read upstream response.")

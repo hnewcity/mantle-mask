@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
+	"github.com/hnewcity/mantle-mask/internal/backup"
 	"github.com/hnewcity/mantle-mask/internal/config"
 	"github.com/hnewcity/mantle-mask/internal/usage"
 )
@@ -35,14 +38,77 @@ type restoreJournal struct {
 }
 
 func (g *Gateway) ExportBackup(ctx context.Context) (Backup, error) {
+	out, view, err := g.pinBackup(ctx)
+	if err != nil {
+		return out, err
+	}
+	defer view.Close()
+	// WAL retains the pinned database view while new requests keep writing.
+	out.Usage, err = view.Export(ctx)
+	return out, err
+}
+
+// ExportBackupArchive encrypts the same document as json.Marshal(ExportBackup)
+// without materializing the usage history as Go values or a separate
+// plaintext buffer; the archive is the only history-sized allocation.
+func (g *Gateway) ExportBackupArchive(ctx context.Context, password string) ([]byte, error) {
+	out, view, err := g.pinBackup(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer view.Close()
+	head := struct {
+		Format    string               `json:"format"`
+		Version   int                  `json:"version"`
+		CreatedAt time.Time            `json:"created_at"`
+		Config    config.PortableState `json:"config"`
+	}{out.Format, out.Version, out.CreatedAt, out.Config}
+	return backup.EncryptStream(func(w io.Writer) error {
+		return writeWithUsage(w, head, out.Affinity, func(w io.Writer) error { return view.WriteJSON(ctx, w) })
+	}, password)
+}
+
+// writeWithUsage writes head's members followed by "usage" and "affinity",
+// matching the field order and encoding of json.Marshal on Backup and
+// restoreJournal. head must encode as a non-empty object.
+func writeWithUsage(w io.Writer, headValue any, affinityValue map[string]Binding, usageJSON func(io.Writer) error) error {
+	head, err := json.Marshal(headValue)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(head[:len(head)-1]); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, `,"usage":`); err != nil {
+		return err
+	}
+	if err := usageJSON(w); err != nil {
+		return err
+	}
+	affinity, err := json.Marshal(affinityValue)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, `,"affinity":`); err != nil {
+		return err
+	}
+	if _, err := w.Write(affinity); err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, "}")
+	return err
+}
+
+// pinBackup captures configuration and routing and pins the usage view at one
+// checkpoint. The caller closes the returned snapshot.
+func (g *Gateway) pinBackup(ctx context.Context) (Backup, *usage.Snapshot, error) {
 	out := Backup{Format: "mantle-mask", Version: 2}
 	// Reserve a reader outside the checkpoint; a busy reporting pool must not
 	// hold up active accounting while waiting for a connection.
 	view, err := g.usage.PrepareSnapshot(ctx)
 	if err != nil {
-		return out, err
+		return out, nil, err
 	}
-	defer view.Close()
 	err = func() error {
 		gate := g.store.Coordinator()
 		gate.Lock()
@@ -64,24 +130,71 @@ func (g *Gateway) ExportBackup(ctx context.Context) (Backup, error) {
 		return nil
 	}()
 	if err != nil {
-		return out, err
+		view.Close()
+		return out, nil, err
 	}
-	// WAL retains the pinned database view while new requests keep writing.
-	out.Usage, err = view.Export(ctx)
-	return out, err
+	return out, view, nil
 }
 
 func DecodeBackup(data []byte) (Backup, error) {
 	var out Backup
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&out); err != nil {
+	// Walk the document instead of Decode(&out): a Decoder buffers each value
+	// it decodes in full, which for the usage history is the whole archive.
+	err := backup.DecodeObject(decoder, func(name string) error {
+		switch {
+		case strings.EqualFold(name, "format"):
+			return decoder.Decode(&out.Format)
+		case strings.EqualFold(name, "version"):
+			return decoder.Decode(&out.Version)
+		case strings.EqualFold(name, "created_at"):
+			return decoder.Decode(&out.CreatedAt)
+		case strings.EqualFold(name, "config"):
+			return decoder.Decode(&out.Config)
+		case strings.EqualFold(name, "usage"):
+			var err error
+			out.Usage, err = usage.DecodeBackupJSON(decoder)
+			return err
+		case strings.EqualFold(name, "affinity"):
+			out.Affinity = nil
+			return decoder.Decode(&out.Affinity)
+		}
+		return errors.New("unknown field")
+	})
+	if err != nil {
 		return out, errors.New("备份内容无效或包含不受支持的字段")
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return out, errors.New("备份只能包含一个完整对象")
 	}
 	return out, nil
+}
+
+// decodeJournal is DecodeBackup for the restore journal, read from disk.
+func decodeJournal(r io.Reader) (restoreJournal, error) {
+	var out restoreJournal
+	decoder := json.NewDecoder(r)
+	err := backup.DecodeObject(decoder, func(name string) error {
+		switch {
+		case strings.EqualFold(name, "usage_only"):
+			return decoder.Decode(&out.UsageOnly)
+		case strings.EqualFold(name, "version"):
+			return decoder.Decode(&out.Version)
+		case strings.EqualFold(name, "config"):
+			return decoder.Decode(&out.Config)
+		case strings.EqualFold(name, "usage"):
+			var err error
+			out.Usage, err = usage.DecodeBackupJSON(decoder)
+			return err
+		case strings.EqualFold(name, "affinity"):
+			out.Affinity = nil
+			return decoder.Decode(&out.Affinity)
+		}
+		// Journals written by this program have no other fields.
+		return decoder.Decode(new(json.RawMessage))
+	})
+	return out, err
 }
 
 func (g *Gateway) PrepareBackup(in Backup, usageOnly ...bool) (restoreJournal, error) {
@@ -128,7 +241,15 @@ func (g *Gateway) RestorePending() bool { return g.restorePending.Load() }
 // live data. A failed/interrupted application is replayed idempotently on startup;
 // failed jobs remain resumable, without disabling the live request path.
 func (g *Gateway) RestoreBackup(in restoreJournal) error {
-	if err := config.AtomicJSON(g.restorePath(), in); err != nil {
+	// Streamed: json.Encoder would first build the whole history in memory.
+	if err := config.AtomicWrite(g.restorePath(), func(w io.Writer) error {
+		head := struct {
+			UsageOnly bool         `json:"usage_only,omitempty"`
+			Version   int          `json:"version"`
+			Config    config.State `json:"config"`
+		}{in.UsageOnly, in.Version, in.Config}
+		return writeWithUsage(w, head, in.Affinity, func(w io.Writer) error { return usage.WriteBackupJSON(w, in.Usage) })
+	}); err != nil {
 		return err
 	}
 	g.restorePending.Store(true)
@@ -139,15 +260,16 @@ func (g *Gateway) RestoreBackup(in restoreJournal) error {
 }
 
 func (g *Gateway) recoverRestore() error {
-	data, err := os.ReadFile(g.restorePath())
+	f, err := os.Open(g.restorePath())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	var in restoreJournal
-	if err := json.Unmarshal(data, &in); err != nil {
+	in, err := decodeJournal(bufio.NewReaderSize(f, 64<<10))
+	f.Close()
+	if err != nil {
 		return err
 	}
 	if (in.Version != 1 && in.Version != 2) || in.Config.Version != 2 || in.Affinity == nil {
@@ -182,11 +304,7 @@ func (g *Gateway) applyRestore(in restoreJournal) error {
 		if err := g.store.RestoreWith(in.Config, func() error {
 			g.affinity.mu.Lock()
 			defer g.affinity.mu.Unlock()
-			if err := config.AtomicJSON(g.affinity.path, in.Affinity); err != nil {
-				return err
-			}
-			g.affinity.bindings = in.Affinity
-			return nil
+			return g.affinity.replaceLocked(in.Affinity)
 		}); err != nil {
 			return err
 		}
@@ -236,11 +354,7 @@ func (g *Gateway) mergeAffinity(in map[string]Binding) error {
 	if len(merged) > 100000 {
 		return errors.New("合并后的 Responses 路由超过容量限制")
 	}
-	if err := config.AtomicJSON(g.affinity.path, merged); err != nil {
-		return err
-	}
-	g.affinity.bindings = merged
-	return nil
+	return g.affinity.replaceLocked(merged)
 }
 
 // Linux directory fsync makes journal publication/removal durable across power

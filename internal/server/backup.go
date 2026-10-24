@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -43,7 +42,9 @@ func (s *Server) exportBackup(c *gin.Context) {
 		abortError(c, http.StatusBadRequest, "invalid_password", err.Error())
 		return
 	}
-	snapshot, err := s.gateway.ExportBackup(c.Request.Context())
+	// Streamed straight into the encrypted archive: the usage history is never
+	// held as Go values or as a separate plaintext copy.
+	data, err := s.gateway.ExportBackupArchive(c.Request.Context(), input.Password)
 	if err != nil {
 		if errors.Is(err, backup.ErrTooLarge) {
 			abortError(c, http.StatusRequestEntityTooLarge, "backup_too_large", err.Error())
@@ -51,21 +52,6 @@ func (s *Server) exportBackup(c *gin.Context) {
 		}
 		slog.Error("backup snapshot failed", "error", err)
 		abortError(c, http.StatusInternalServerError, "backup_failed", "读取完整备份失败，请检查数据存储。未生成不完整备份。")
-		return
-	}
-	plain, err := json.Marshal(snapshot)
-	if err != nil {
-		abortError(c, http.StatusInternalServerError, "backup_failed", "备份序列化失败。")
-		return
-	}
-	defer clear(plain)
-	data, err := backup.Encrypt(plain, input.Password)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, backup.ErrTooLarge) {
-			status = http.StatusRequestEntityTooLarge
-		}
-		abortError(c, status, "backup_failed", err.Error())
 		return
 	}
 	c.Header("Content-Disposition", `attachment; filename="mantle-mask-`+time.Now().UTC().Format("20060102-150405")+`.mmbak"`)
@@ -108,18 +94,23 @@ func (s *Server) restoreBackup(c *gin.Context) {
 		return
 	}
 	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, backup.MaxSize+1))
-	if err != nil {
+	// The multipart header states the size; read into one exact buffer rather
+	// than letting io.ReadAll repeatedly double toward 256 MiB.
+	data := make([]byte, files[0].Size)
+	if _, err := io.ReadFull(file, data); err != nil {
 		abortError(c, http.StatusBadRequest, "invalid_backup_file", "无法读取备份文件。")
 		return
 	}
-	plain, err := backup.Decrypt(data, password)
+	plain, err := backup.DecryptInPlace(data, password)
 	if err != nil {
 		abortError(c, http.StatusBadRequest, "invalid_backup", err.Error())
 		return
 	}
-	defer clear(plain)
 	snapshot, err := gateway.DecodeBackup(plain)
+	// The decoded snapshot is all that is needed from here on; drop the
+	// archive-sized buffer before validation and the restore journal.
+	clear(plain)
+	plain, data = nil, nil
 	if err != nil {
 		abortError(c, http.StatusBadRequest, "invalid_backup", err.Error())
 		return
