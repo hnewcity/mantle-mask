@@ -61,7 +61,7 @@ func (s *Server) routes() {
 
 	admin := api.Group("/admin", s.requireAdmin, s.guardPendingRestore)
 	admin.GET("/session", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "authenticated", "role": "admin", "version": "0.4.1"})
+		c.JSON(http.StatusOK, gin.H{"status": "authenticated", "role": "admin", "version": webassets.Version})
 	})
 	admin.GET("/users", s.listUsers)
 	admin.POST("/users", s.saveUser)

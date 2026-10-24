@@ -40,7 +40,7 @@ function Login({ onLogin }: { onLogin: (identity: SessionInfo) => void }) {
         {error && <p className="form-error" role="alert">{error}</p>}<Button className="login-submit" disabled={busy || !token.trim()}>{busy ? <Loader2 className="animate-spin" /> : <>{userMode ? "查看用量" : "进入控制台"}<ArrowRight size={16} /></>}</Button>
       </form>
       {userMode && <div className="login-help"><CircleHelp size={17} /><div><strong>使用管理员分配的 Key</strong><p>你可以查看本人名下所有 Key 的用量。需要创建或撤销密钥时，请联系网关管理员。</p></div></div>}
-    </div><p className="login-security"><ShieldCheck size={14} />令牌仅保存在当前浏览器会话中<span>v0.2.0</span></p></div></div>
+    </div><p className="login-security"><ShieldCheck size={14} />令牌仅保存在当前浏览器会话中<span>v{__APP_VERSION__}</span></p></div></div>
 }
 
 export default function App() {
@@ -101,6 +101,6 @@ export default function App() {
         {current.id === "playground" && <Playground upstreams={data.upstreams} onComplete={reload} />}
         {current.id === "logs" && <Logs />}
         {current.id === "settings" && <SettingsPage settings={data.settings} reload={reload} />}
-      </Suspense>}</main><footer className="footer"><span>MANTLE MASK · YOUR MODELS. YOUR INFRASTRUCTURE.</span><span><i className="footer-dot" />{enabled} 个上游已启用 <span>/</span> OpenAI compatible <span>/</span> v0.2.0</span></footer>
+      </Suspense>}</main><footer className="footer"><span>MANTLE MASK · YOUR MODELS. YOUR INFRASTRUCTURE.</span><span><i className="footer-dot" />{enabled} 个上游已启用 <span>/</span> OpenAI compatible <span>/</span> v{__APP_VERSION__}</span></footer>
     </div><Toast /></div>
 }
