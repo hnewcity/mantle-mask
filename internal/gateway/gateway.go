@@ -262,9 +262,9 @@ func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, princip
 	fields := requestObject{}
 	if r.Method == http.MethodPost {
 		var err error
-		body, err = boundedRead(r.Body, 16<<20, r.ContentLength)
+		body, err = boundedRead(r.Body, 64<<20, r.ContentLength)
 		if err != nil {
-			fail(413, "request_too_large", "Request body could not be read or exceeds 16 MiB.")
+			fail(413, "request_too_large", "Request body could not be read or exceeds 64 MiB.")
 			return
 		}
 		if len(body) == 0 && strings.HasSuffix(path, "/cancel") {

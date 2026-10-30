@@ -55,8 +55,8 @@ func run() error {
 	addr := env("MANTLE_ADDR", "127.0.0.1:8080")
 	srv := &http.Server{
 		Addr: addr, Handler: server.New(store, proxy, admin, os.Getenv("MANTLE_CORS_ORIGINS")),
-		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
-		IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10,
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 2 * time.Minute,
+		IdleTimeout: 120 * time.Second, MaxHeaderBytes: 256 << 10,
 		// Stream writes are individually bounded inside the proxy.
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
