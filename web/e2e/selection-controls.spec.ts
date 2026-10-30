@@ -3,6 +3,9 @@ import { expect, test } from "@playwright/test"
 test("consistent dropdowns, searchable model entry and bounded Chinese calendars", async ({ page }) => {
   const errors: string[] = []
   page.on("pageerror", error => errors.push(error.message))
+  // The range checks pick tomorrow as the end date; mid-month keeps a disabled
+  // day inside the visible month on both calendars.
+  await page.clock.setFixedTime(new Date(2026, 9, 15, 12))
   await page.goto("/")
   await page.getByLabel("管理员令牌").fill("e2e-admin-token-only-for-local-tests")
   await page.getByRole("button", { name: "进入控制台" }).click()
