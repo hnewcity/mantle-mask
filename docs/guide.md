@@ -2,6 +2,24 @@
 
 [返回项目首页](../README.md) · [Docker 与版本发布](deployment.md) · [开发与贡献](../CONTRIBUTING.md)
 
+## CC Switch 一键导入
+
+先在客户端电脑安装 [CC Switch](https://github.com/farion1231/cc-switch/releases)。
+
+- 管理员：在「API 密钥」创建密钥后，直接在成功弹窗中选择客户端和模型，点击「一键导入 CC Switch」。
+- 用户：使用自己的网关 Key 登录「我的用量」，点击「导入 CC Switch」。导入使用当前登录的完整 Key。
+
+供应商名称默认为 `Mantle Mask · 密钥名称`，可以修改。API 地址为当前控制台站点的 `/v1`；请从客户端可访问的网关地址打开控制台。模型列表通过该网关 Key 读取，支持选择模型或手动输入完整模型 ID / 对外别名。读取失败或列表为空时仍可手动填写。
+
+| 客户端 | 导入行为 |
+| --- | --- |
+| Codex（默认） | 使用 OpenAI Responses 接口，直接访问网关 |
+| Claude Code | 使用 OpenAI Chat Completions 上游格式；需要 CC Switch v4.0.10 或更新版本，并开启其本地路由进行协议转换；Haiku、Sonnet、Opus 三个档位均映射到所选模型 |
+
+点击后允许浏览器打开 CC Switch，再在应用内确认导入和是否切换供应商。工具调用等能力取决于所选模型。浏览器没有响应时，先确认已安装 CC Switch 后重试；也可使用「复制导入链接」。复制功能需要 HTTPS 或 localhost 等浏览器允许访问剪贴板的环境。
+
+导入链接包含完整网关 Key，请按密钥保管，勿公开分享。链接仅在点击导入或复制时生成，不额外持久化。管理员令牌和上游 AWS 凭据不会用于导入。网关只保存客户端 Key 的摘要，因此管理员关闭创建弹窗后无法从密钥列表重新导出旧 Key；持有完整 Key 的用户可登录用量页导入。
+
 ## OpenAI SDK 接入
 
 Python：

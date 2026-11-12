@@ -112,6 +112,8 @@ https://bedrock-mantle.us-east-1.api.aws/openai/v1
 
 ## 🔌 客户端接入
 
+使用 CC Switch 时，可在「API 密钥」创建成功后，或使用网关 Key 登录的「我的用量」页，选择模型并一键导入。默认接入 Codex，也支持经 CC Switch 本地路由接入 Claude Code。详见 [CC Switch 接入指南](docs/guide.md#cc-switch-一键导入)。
+
 安装 Python SDK：`pip install openai`。将网关 Key 放入环境变量 `MANTLE_API_KEY`：
 
 ```python

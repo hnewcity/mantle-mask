@@ -291,6 +291,13 @@ td small { display: block; font-size: 10px; line-height: 1.6; margin-top: 5px; c
 .created-key code { word-break: break-all; font-size: 12px; }
 .success-note { display: flex; align-items: center; gap: 9px; font-size: 11px; color: var(--muted); }
 
+.cc-switch-import { min-width: 0; border-top: 1px solid var(--border); padding-top: 20px; }
+.cc-switch-heading { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; font-size: 12px; }
+.cc-switch-heading code { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.cc-switch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.cc-switch-hint { margin: 12px 0; color: var(--muted); font-size: 11px; line-height: 1.8; }
+.cc-switch-hint .text-link { font-size: inherit; margin: 0 3px; }
+
 /* Square fields, pill actions, and no elevation. */
 /* Contain Radix's hidden form control inside its field, including in dialogs. */
 .select-control { position: relative; width: 100%; min-width: 0; }
