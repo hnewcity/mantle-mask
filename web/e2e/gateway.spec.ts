@@ -60,7 +60,7 @@ test("admin config, key lifecycle, both streaming APIs, logs, and responsive UI"
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.setViewportSize({ width: 1440, height: 1060 })
   await page.getByRole("link", { name: "API 密钥", exact: true }).click()
-  await page.getByRole("button", { name: "撤销", exact: true }).click()
+  await page.getByRole("row").filter({ has: page.getByText("e2e-client", { exact: true }) }).getByRole("button", { name: "撤销", exact: true }).click()
   await page.getByRole("dialog").getByRole("button", { name: "确认", exact: true }).click()
   await expect(page.getByText("e2e-client", { exact: true })).not.toBeVisible()
   const revoked = await page.request.get("/v1/models", { headers: { Authorization: `Bearer ${key}` } })
