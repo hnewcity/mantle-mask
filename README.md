@@ -168,8 +168,8 @@ print(response.output_text)
 | 场景 | 命令 / 镜像 |
 | --- | --- |
 | 最新稳定版 | `ghcr.io/hnewcity/mantle-mask:latest` |
-| 固定版本 | `ghcr.io/hnewcity/mantle-mask:0.4.4` |
-| Docker Hub | `hnewcity/mantle-mask:0.4.4` / `latest` |
+| 固定版本 | `ghcr.io/hnewcity/mantle-mask:0.4.5` |
+| Docker Hub | `hnewcity/mantle-mask:0.4.5` / `latest` |
 | 主分支构建 | `ghcr.io/hnewcity/mantle-mask:edge` |
 | 更新镜像 | `docker compose pull && docker compose up -d --no-build` |
 | 本地源码构建 | `docker compose up -d --build --pull never` |

@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.4.5 — 2026-11-14
+
+- 修复 Codex 报 `stream disconnected before completion: stream closed before response.completed`：带 `store:false` 的 Responses 请求不再写入响应路由记录。此前路由记录达到 10 万条上限后，所有 Responses 流都会在第一个事件处以 `response_observation_failed` 中断。
+- `store` 字段不是布尔值时返回 `400 invalid_store`。
+
 ## 0.4.4 — 2026-11-12
 
 - 新增 CC Switch 一键导入：管理员可在密钥创建成功弹窗中导入，用户可在「我的用量」页使用当前登录密钥导入。
