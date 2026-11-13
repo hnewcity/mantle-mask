@@ -291,6 +291,13 @@ func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, princip
 		fail(400, "invalid_stream", "stream must be a boolean.")
 		return
 	}
+	// store:false responses cannot be retrieved or chained later, so they need
+	// no routing record. Codex sends this on every turn.
+	stored := true
+	if raw, ok := fields.get("store"); ok && string(raw) != "null" && json.Unmarshal(raw, &stored) != nil {
+		fail(400, "invalid_store", "store must be a boolean.")
+		return
+	}
 	if path == "/chat/completions" && log.Stream {
 		// Ask for reported streaming usage unless the caller explicitly opts out.
 		options := map[string]json.RawMessage{}
@@ -415,7 +422,7 @@ func (g *Gateway) ProxyWithState(w http.ResponseWriter, r *http.Request, princip
 			}
 			return nil
 		}
-		if strings.HasPrefix(path, "/responses") {
+		if strings.HasPrefix(path, "/responses") && stored {
 			obs.onResponse = func(id string) error {
 				responseScope = scopeKey(principal.ID, requestedProject, id)
 				requestID := ""

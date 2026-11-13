@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -314,6 +315,33 @@ func TestStreamingResponsesAffinity(t *testing.T) {
 	read(t, f.request("POST", "/v1/responses", f.token, `{"model":"m","input":"hello","stream":true}`, nil), 200)
 	f.restart()
 	read(t, f.request("GET", "/v1/responses/resp_stream/input_items?limit=10", f.token, "", nil), 200)
+}
+
+func TestUnstoredResponsesSkipAffinity(t *testing.T) {
+	f := setup(t)
+	u := upstream(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			gateway.JSON(w, 200, map[string]string{"id": "resp_kept", "object": "response"})
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		id := "resp_kept"
+		if bytes.Contains(body, []byte(`"store":false`)) {
+			id = "resp_unstored"
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":%q,\"object\":\"response\"}}\n\n", id)
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":%q,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n", id)
+	})
+	f.add("stream", u.URL+"/v1", "secret", 1, nil)
+	body := read(t, f.request("POST", "/v1/responses", f.token, `{"model":"m","input":"hi","stream":true,"store":false}`, nil), 200)
+	if !bytes.Contains(body, []byte("response.completed")) || bytes.Contains(body, []byte("event: error")) {
+		t.Fatalf("unstored stream not passed through: %s", body)
+	}
+	read(t, f.request("GET", "/v1/responses/resp_unstored", f.token, "", nil), 404)
+	read(t, f.request("POST", "/v1/responses", f.token, `{"model":"m","input":"hi","stream":true,"store":true}`, nil), 200)
+	read(t, f.request("GET", "/v1/responses/resp_kept", f.token, "", nil), 200)
+	read(t, f.request("POST", "/v1/responses", f.token, `{"model":"m","input":"hi","store":"no"}`, nil), 400)
 }
 
 func TestNoFailoverForValidationOrPinnedRequest(t *testing.T) {
